@@ -1,0 +1,126 @@
+# =====================================================================
+# MIBEL-Ops · .gitignore
+# PUBLIC repository: when in doubt, leave it out. See AGENTS.md §3.
+# =====================================================================
+
+# --- Secrets and credentials (NEVER in the repository) ---------------
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+*.secret
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+# Kubernetes / K3s
+kubeconfig*
+*.kubeconfig
+.kube/
+k3s-token*
+node-token
+# VPN
+tailscale*.key
+*.authkey
+wg*.conf
+# API tokens (ESIOS, ENTSO-E, AEMET…) if someone stores them in a file
+*token*.txt
+*token*.json
+
+# --- Python / environments (venv + pip) ------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.ipynb_checkpoints/
+
+# --- Data (versioned with DVC, not Git) ------------------------------
+/data/**
+!/data/**/
+!/data/**/*.dvc
+!/data/.gitignore
+!/data/README.md
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+# API dumps and downloaded OMIE files
+downloads/
+raw_dumps/
+*.zip
+*.gz
+# Small synthetic test fixtures: these ARE versioned
+!tests/fixtures/**
+
+# --- DVC: .dvc/config is versioned, the cache is not ----------------
+.dvc/cache/
+.dvc/tmp/
+.dvc/config.local
+.dvc/plots/
+
+# --- ML artifacts (live in MLflow/DVC) -------------------------------
+mlruns/
+mlartifacts/
+*.onnx
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+models/
+
+# --- Local databases and buffers -------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+buffer/
+
+# --- Manager services (Docker Compose volumes) -----------------------
+volumes/
+.docker-data/
+pgdata/
+kafka-data/
+grafana-data/
+superset-data/
+prometheus-data/
+.prefect/
+
+# --- Generated reports and logs --------------------------------------
+reports/
+*.log
+logs/
+
+# --- Editor and operating system -------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- Agent tools (local state) ---------------------------------------
+.claude/settings.local.json
