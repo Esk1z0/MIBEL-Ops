@@ -1,0 +1,221 @@
+# MIBEL-Ops ingestor configuration (ADR-05). Versioned: NO secrets and NO infrastructure data here
+# (AGENTS.md §3). Tokens come from the environment (.env / systemd EnvironmentFile); node identity,
+# Kafka address and metrics bind address from MIBEL_NODE_ID, MIBEL_KAFKA_BOOTSTRAP, MIBEL_METRICS_HOST.
+# Local, unversioned tweaks: ingestor.local.yaml next to this file (same override rules as --set).
+version: 1
+timezone: Europe/Madrid          # OMIE and REE publish in Spanish local time
+
+# ---------------------------------------------------------------------------------------- modes
+modes:
+  pro:                           # production: fixed behaviour, nothing can be overridden
+    quality_profile: production
+    overridable: []
+  test:                          # same as pro, but the output and observability can change
+    quality_profile: production  #   (e.g. --set sink.type=jsonl while Kafka is not running yet)
+    overridable: [sink, metrics, buffer.path, service.log_level, "sources.*.enabled"]
+  dev:                           # everything can be changed, for partial tests
+    quality_profile: development
+    overridable: ["*"]
+    defaults: {sink.type: stdout, service.log_level: WARNING}   # applied before any override
+
+# ------------------------------------------------------------- service (values below = pro mode)
+service:
+  log_level: INFO
+  workers: 3                     # thread pool size; jobs are short and mostly wait on the network
+  retry_on_failure: {first: 1m, max: 15m}   # after a failed run; never stops retrying
+
+http:
+  timeout: 30s
+  retries: 3                     # bounded retries per run (429/5xx and connection errors)
+  backoff: 2s
+  max_response_mb: 25
+  user_agent: MIBEL-Ops-ingestor/0.1
+
+sink:
+  type: kafka                    # kafka | jsonl | stdout | null
+  topic_prefix: mibel.raw        # topic per source: mibel.raw.<source>
+  dlq_topic: mibel.dlq
+  path: ingestor-out.jsonl       # jsonl sink only, relative to the state directory
+  max_mb: 50
+  kafka: {acks: all, compression: lz4, linger_ms: 50}
+
+buffer:                          # delivered rows deleted at once; only the manager keeps data for real
+  path: buffer.sqlite            # relative to the state directory ($STATE_DIRECTORY under systemd)
+  pending_ttl: 30d               # autonomy without the manager (NFR-03); older undelivered messages are dropped
+  max_mb: 1000                   # 1 GB cap, oldest dropped first
+  flush_every: 5s
+  batch: 200
+  seen_ttl: 8d                   # change-detection memory; must cover the longest live window
+  quarantine_ttl: 24h
+
+metrics:
+  enabled: true
+  host: 127.0.0.1                # set MIBEL_METRICS_HOST to the VPN address so Prometheus can scrape it
+  port: 9108
+
+# -------------------------------------------------------------------------------------- sources
+# Common dataset keys: nature (observation | forecast | market), resolution (grid, DG-E03),
+# schedule {every, offset} aligned to local time, window {back, ahead} for live capture,
+# publication {lag} or {at, day_offset}: conservative available_at estimate used only in backfill.
+sources:
+  omie:                          # public files, no key
+    enabled: true
+    nature: market
+    resolution: 15m
+    schedule: {every: 1h, offset: 7m}
+    window: {back: 1d, ahead: 2d}
+    datasets:
+      day_ahead:
+        file: marginalpdbc
+        variable: price_day_ahead
+        publication: {at: "13:00", day_offset: -1}
+      intraday_auctions:         # IDA1, IDA2, IDA3 -> price_ida1..3
+        file: marginalpibc
+        sessions: [1, 2, 3]
+        schedule: {every: 1h, offset: 12m}
+        publication: {at: "10:30", day_offset: 0}      # conservative: after the last session (IDA3)
+      continuous:                # target: published ~03:00 on D+1 with its own emission time
+        file: precios_pibcic
+        schedule: {every: 1h, offset: 17m}
+        window: {back: 2d, ahead: 0s}
+        publication: {at: "04:00", day_offset: 1}
+
+  esios:                         # REE, needs ESIOS_TOKEN; on automatically when it is set
+    enabled: auto
+    secrets: [ESIOS_TOKEN]
+    min_interval: 1s             # politeness between requests
+    schedule: {every: 15m, offset: 2m}
+    window: {back: 3h, ahead: 0s}
+    datasets:
+      demand_real:        {indicator: 1293, geo: Península, node: ES-PEN, unit: MW, nature: observation,
+                           resolution: 5m, schedule: {every: 5m, offset: 1m}, publication: {lag: 10m}}
+      pv_real:            {indicator: 1295, geo: Península, node: ES-PEN, unit: MW, nature: observation,
+                           resolution: 5m, schedule: {every: 5m, offset: 1m}, publication: {lag: 10m}}
+      demand_forecast_h3: {indicator: 1776, unit: MW, nature: forecast, resolution: 1h,
+                           window: {back: 1h, ahead: 6h}}
+      wind_forecast:      {indicator: 541, geo: Península, node: ES-PEN, unit: MW, nature: forecast,
+                           resolution: 15m, window: {back: 1h, ahead: 2d}}
+      wind_forecast_h3:   {indicator: 1778, unit: MW, nature: forecast, resolution: 1h,
+                           window: {back: 1h, ahead: 6h}}
+      pv_forecast_d1:     {indicator: 1779, unit: MW, nature: forecast, resolution: 1h,
+                           schedule: {every: 1h, offset: 5m}, window: {back: 0s, ahead: 2d}}
+      pv_forecast_h3:     {indicator: 1780, unit: MW, nature: forecast, resolution: 1h,
+                           window: {back: 1h, ahead: 6h}}
+      price_day_ahead:    {indicator: 600, geos: {España: ES, Francia: FR}, unit: EUR/MWh,   # one request, 2 nodes
+                           nature: market, resolution: 15m, schedule: {every: 1h, offset: 9m},
+                           window: {back: 1h, ahead: 2d}, publication: {at: "13:00", day_offset: -1}}
+      pvpc:               {indicator: 1001, geo: Península, node: ES-PEN, unit: EUR/MWh, nature: market,
+                           resolution: 1h, schedule: {every: 1h, offset: 21m}, window: {back: 1h, ahead: 2d},
+                           publication: {at: "20:30", day_offset: -1}}
+      price_continuous_ref: {indicator: 1727, geo: España, node: ES, unit: EUR/MWh, nature: market,
+                           resolution: 1h, schedule: {every: 1h, offset: 23m}, window: {back: 2d, ahead: 0s},
+                           publication: {at: "04:00", day_offset: 1}}
+
+  redata:                        # REE APIdatos, no key: fallback and cross-check of ESIOS
+    enabled: true
+    schedule: {every: 15m, offset: 3m}
+    window: {back: 3h, ahead: 0s}
+    datasets:
+      demand_real_time:
+        category: demanda
+        widget: demanda-tiempo-real
+        time_trunc: hour         # the widget returns 5-minute values anyway
+        series: {Real: demand_real}
+        node: ES
+        unit: MW
+        nature: observation
+        resolution: 5m
+        publication: {lag: 10m}
+      installed_capacity:        # feeds DG-E11 (generation ≤ capacity × 1.05)
+        enabled: false           # [VERIFY] endpoint returned HTTP 500 on 2026-11-11
+        role: capacity
+        category: generacion
+        widget: potencia-instalada
+        time_trunc: month
+        variable_prefix: installed_capacity_
+        unit: MW
+        nature: observation
+        resolution: 1d
+        schedule: {every: 24h, offset: 4h}
+        window: {back: 62d, ahead: 0s}
+
+  open_meteo:                    # no key, CC BY 4.0
+    enabled: true
+    nature: forecast
+    resolution: 1h
+    schedule: {every: 1h, offset: 12m}
+    window: {back: 0s, ahead: 2d}
+    nodes:                       # strategic weather nodes (approximate public coordinates)
+      aragon:      {lat: 41.83, lon: -1.53, kind: wind}
+      galicia:     {lat: 43.20, lon: -7.80, kind: wind}
+      extremadura: {lat: 38.90, lon: -6.30, kind: solar}
+      andalucia:   {lat: 37.40, lon: -5.60, kind: solar}
+    datasets:
+      forecast:
+        api: forecast
+        backfill_chunk_days: 31
+        publication: {lag: 0s}   # [VERIFY] historical forecasts are stitched from short leads
+        variables:
+          wind_speed_100m: m/s   # derived from 80 m and 120 m (power law)
+          direct_radiation: W/m2
+          diffuse_radiation: W/m2
+          cloud_cover: "%"
+          temperature_2m: degC
+      satellite:                 # observed radiation (solar nodes only)
+        api: satellite
+        nature: observation
+        schedule: {every: 1h, offset: 27m}
+        window: {back: 1d, ahead: 0s}
+        backfill_chunk_days: 31
+        publication: {lag: 3h}
+        variables:
+          direct_radiation_observed: {param: direct_radiation, unit: W/m2}
+          shortwave_radiation_observed: {param: shortwave_radiation, unit: W/m2}
+
+  mibgas:                        # yearly Excel, no key; needs the 'excel' extra
+    enabled: true
+    nature: market
+    resolution: 1d
+    schedule: {every: 12h, offset: 9h30m}   # 09:30 and 21:30: the 3.3 MB Excel is the costliest parse (bench)
+    window: {back: 7d, ahead: 2d}
+    datasets:
+      daily_index:
+        sheet: MIBGAS Indexes
+        date_column: Delivery day
+        columns:
+          MIBGAS-ES Index: gas_mibgas_es_index
+          MIBGAS PVB Average Price Index Day-Ahead: gas_pvb_da_average_index
+        unit: EUR/MWh
+        backfill_chunk_days: 366
+        publication: {at: "20:00", day_offset: -1}   # [VERIFY] index publication time
+
+  aemet:                         # optional, needs AEMET_API_KEY; live only
+    enabled: auto
+    secrets: [AEMET_API_KEY]
+    nature: observation
+    resolution: 1h
+    min_interval: 2s
+    schedule: {every: 1h, offset: 25m}
+    window: {back: 12h, ahead: 0s}
+    datasets:
+      stations:                  # nearest station with wind per weather node (wip/ingestion/01, 2026-11-11)
+        stations: {aragon: 9311X, galicia: 1518A, extremadura: 4410X, andalucia: 5656}
+        variables:
+          vv: {variable: wind_speed_station_10m, unit: m/s}
+          ta: {variable: temperature_station, unit: degC}
+
+  entsoe:                        # needs ENTSOE_TOKEN; switches on by itself when the token is set
+    enabled: auto
+    secrets: [ENTSOE_TOKEN]
+    nature: observation
+    resolution: 15m
+    min_interval: 1s
+    schedule: {every: 1h, offset: 33m}
+    window: {back: 1d, ahead: 0s}
+    datasets:
+      flow_fr_es: {document_type: A11, in_domain: 10YES-REE------0, out_domain: 10YFR-RTE------C,
+                   variable: physical_flow_fr_es, node: ES, unit: MW, backfill_chunk_days: 7}
+      flow_es_fr: {document_type: A11, in_domain: 10YFR-RTE------C, out_domain: 10YES-REE------0,
+                   variable: physical_flow_es_fr, node: ES, unit: MW, backfill_chunk_days: 7}
+      flow_pt_es: {document_type: A11, in_domain: 10YES-REE------0, out_domain: 10YPT-REN------W,
+                   variable: physical_flow_pt_es, node: ES, unit: MW, backfill_chunk_days: 7}

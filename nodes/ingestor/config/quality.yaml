@@ -1,0 +1,113 @@
+# Edge data gates (DG-E) for the ingestor node. Each node has its own quality file so the ingestor
+# can be deployed alone (ADR-05). Source of truth for values and status: docs/quality/01_data_gates.md §2.
+# Changing a `production` value or mode, or setting a status to fixed, requires the maintainer's
+# confirmation and a changelog entry in that document (AGENTS.md §4).
+version: "0.2"
+criteria:
+  DG-E01:
+    desc: structure matches the source contract (parsers raise ContractError)
+    check: contract
+    status: fixed
+  DG-E02:
+    desc: mandatory fields present and value finite
+    check: not_null
+    status: fixed
+    development: {mode: block}
+    production: {mode: block}
+  DG-E03:
+    desc: event_time in UTC and aligned with the dataset grid (resolution)
+    check: grid
+    status: fixed
+    development: {mode: block}
+    production: {mode: block}
+  DG-E04:
+    desc: available_at >= event_time for measured observations
+    check: available_after_event
+    natures: [observation]
+    status: fixed
+    development: {mode: block}
+    production: {mode: block}
+  DG-E05:
+    desc: measured event_time not in the future
+    check: not_future
+    natures: [observation]
+    status: provisional
+    development: {value: 5m, mode: block}
+    production: {value: 5m, mode: block}
+  DG-E06:
+    desc: radiation W/m2
+    check: range
+    variables: ["*radiation*"]
+    status: provisional
+    development: {value: [0, 1200], mode: block}
+    production: {value: [0, 1200], mode: block}
+  DG-E07:
+    desc: wind speed m/s
+    check: range
+    variables: ["wind_speed*"]
+    status: provisional
+    development: {value: [0, 60], mode: block}
+    production: {value: [0, 60], mode: block}
+  DG-E08:
+    desc: temperature degC
+    check: range
+    variables: ["temperature*"]
+    status: provisional
+    development: {value: [-30, 50], mode: block}
+    production: {value: [-30, 50], mode: block}
+  DG-E09:
+    desc: cloud cover %
+    check: range
+    variables: ["cloud_cover*"]
+    status: fixed
+    development: {value: [0, 100], mode: block}
+    production: {value: [0, 100], mode: block}
+  DG-E10:
+    desc: peninsular demand MW
+    check: range
+    variables: ["demand_*"]
+    status: provisional
+    development: {value: [10000, 50000], mode: block}
+    production: {value: [10000, 50000], mode: block}
+  DG-E11:
+    desc: generation >= -1 % of installed capacity (thermal, storage) or >= 0 (rest); <= capacity x 1.05
+    check: generation
+    variables: ["pv_*", "wind_forecast*", "generation_*"]
+    negative_allowed: ["generation_*combined_cycle*", "generation_*coal*", "generation_*cogeneration*",
+                       "generation_*nuclear*", "generation_*pump*", "generation_*storage*", "generation_*battery*"]
+    capacity_of: {"pv_*": solar_photovoltaic, "wind_*": wind}
+    status: provisional
+    development: {value: {negative_share: 0.01, max_factor: 1.05}, mode: warn}
+    production: {value: {negative_share: 0.01, max_factor: 1.05}, mode: block}
+  DG-E12:
+    desc: day-ahead, IDA and PVPC price EUR/MWh (harmonised limits, [VERIFY])
+    check: range
+    variables: ["price_day_ahead*", "price_ida*", "pvpc*"]
+    status: provisional
+    development: {value: [-500, 4000], mode: block}
+    production: {value: [-500, 4000], mode: block}
+  DG-E13:
+    desc: continuous intraday price EUR/MWh (technical limits, [VERIFY])
+    check: range
+    variables: ["price_continuous*"]
+    status: provisional
+    development: {value: [-9999, 9999], mode: block}
+    production: {value: [-9999, 9999], mode: block}
+  DG-E14:
+    desc: gas price EUR/MWh
+    check: range
+    variables: ["gas_*"]
+    status: provisional
+    development: {value: [0, 500], mode: block}
+    production: {value: [0, 500], mode: block}
+  DG-E15:
+    desc: normalised units
+    check: units
+    status: fixed
+    development: {value: [MW, MWh, EUR/MWh, m/s, W/m2, degC, "%"], mode: block}
+    production: {value: [MW, MWh, EUR/MWh, m/s, W/m2, degC, "%"], mode: block}
+  DG-E16:
+    desc: OMIE continuous periods with max = min = VWAP = 0 are no-trade -> missing (omie parser)
+    check: connector
+    sources: [omie]
+    status: provisional
