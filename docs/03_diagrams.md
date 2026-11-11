@@ -96,7 +96,7 @@ flowchart LR
 flowchart TB
     subgraph VPN["Tailscale / WireGuard VPN"]
         subgraph NI["Ingestor · systemd, no Docker"]
-            CON["Pluggable connectors"] --> EV["Edge validator"] --> BUF[("SQLite buffer<br/>30 d / 1 GB")] --> PRD["Kafka producer"]
+            CON["Connector registry<br/>(one per source)"] --> EV["Edge gates DG-E"] --> BUF[("SQLite outbox<br/>undelivered only, ≤ 30 d")] --> PRD["Sink: Kafka"]
         end
 
         subgraph NG["Manager · Docker Compose + K3s server (taint)"]
@@ -218,12 +218,12 @@ sequenceDiagram
         I->>B: store (deterministic id)
         I-xK: send fails
     end
-    Note over B: up to 30 days / 1 GB
+    Note over B: undelivered only: up to 30 days / 1 GB (ADR-05)
     K-->>I: the manager comes back
     I->>K: resend in order (in batches)
     K-->>I: ack
-    I->>B: mark as sent
-    Note over K: The manager recovers the history.<br/>No predictions for that period,<br/>but data is available to evaluate and retrain.
+    I->>B: delete delivered messages
+    Note over K: Gaps longer than the buffer life are<br/>recovered with backfill from the sources.<br/>No predictions for that period.
 ```
 
 ---
@@ -366,7 +366,7 @@ classDiagram
         +int horizon
         +float price_day_ahead
         +float price_ida_last
-        +float price_continuous_last
+        +float price_continuous_d1
         +float renewable_deviation_mw
         +float thermal_gap_mw
         +float exchange_france_mw
@@ -562,15 +562,17 @@ mibel-ops/
 │           └── config/
 │
 ├── nodes/
-│   ├── ingestor/                     # ── INGESTOR · lightweight, systemd
-│   │   ├── connectors/               #   esios.py · omie.py · open_meteo.py · mibgas.py · redata.py
-│   │   │   └── base.py               #   Connector interface (pluggable)
-│   │   ├── edge_validator.py
-│   │   ├── buffer.py                 #   SQLite, 30 d / 1 GB
-│   │   ├── producer.py               #   Kafka
-│   │   ├── backfill.py
-│   │   ├── requirements.txt
-│   │   └── deploy/                   #   install.sh (creates venv) · mibel-ingestor.service · config.example.yaml
+│   ├── ingestor/                     # ── INGESTOR · lightweight, systemd, self-contained (ADR-05)
+│   │   ├── pyproject.toml            #   package mibel-ingestor · extras [excel] [kafka] [dev]
+│   │   ├── requirements.lock.txt     #   runtime pins for the nodes
+│   │   ├── config/                   #   ingestor.yaml (sources, cadences, modes) · quality.yaml (DG-E)
+│   │   ├── src/mibel_ingestor/
+│   │   │   ├── connectors/           #   base.py (port + registry) · one module per source
+│   │   │   ├── pipeline.py           #   requests → parse → change detection → gates → outbox
+│   │   │   ├── gates.py · store.py · sinks.py · scheduler.py · metrics.py · cli.py
+│   │   ├── tests/                    #   contract tests per connector, synthetic payloads
+│   │   ├── benchmarks/               #   bench.py: dev PC vs Raspberry Pi
+│   │   └── deploy/                   #   install.sh · mibel-ingestor.service · env.example
 │   │
 │   ├── manager/                      # ── MANAGER · strict coordinator
 │   │   ├── consumer/                 #   Kafka → dedup → GE → TimescaleDB · window.ready
@@ -602,7 +604,8 @@ mibel-ops/
 │   └── cloud/                        # generic VM template (cloud-init), no provider-specific services
 ├── config/                           # settings.yaml · retention.yaml · sources.yaml · quality/{data_gates,service_baseline,promotion}.yaml
 ├── data/                             # *.dvc
-├── tests/                            # unit · point-in-time · e2e
+├── tests/                            # cross-node: unit · point-in-time · e2e (node tests live in each node)
+├── wip/                              # untested work in progress (notebooks, prototypes); local only, ignored by Git
 ├── docs/
 ├── .env.example                      # ESIOS / ENTSO-E tokens (never in the repo)
 └── .github/workflows/                # CI (Python version matrix) + images per role
@@ -611,6 +614,6 @@ mibel-ops/
 Installation per role (no `uv`):
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e packages/mibel_common[ingestor]   # or [manager] / [compute]
-pip install -r nodes/ingestor/requirements.txt
+pip install -e packages/mibel_common[manager]    # or [compute]
+pip install -r nodes/ingestor/requirements.lock.txt && pip install --no-deps -e nodes/ingestor   # ingestor: self-contained
 ```

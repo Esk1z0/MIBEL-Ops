@@ -177,6 +177,7 @@ reaction:
 
 ## 11. Specific calibration
 - **SB-P01**: after the first backtest with the 5 families, place the production threshold so that **at least one family** passes and is clearly better than day-ahead. If none goes below 0.95, the problem lies in the features, not in the threshold.
+- **Stretch reference (latest IDA)**: day-ahead stays the official baseline of SB-P01. The latest intraday auction price (IDA) is a harder reference (MAE 23.3 vs 36.7 €/MWh in the exploration notebook) and is reported as **rMAE<sub>IDA</sub>** in the model card and in the comparison of candidates, **informational only** (no gate). It may replace day-ahead as the baseline once models beat it consistently; that would be a threshold change with its own changelog entry.
 - **SB-R**: measure on the reference node (RTX 5060 Ti) and on a CPU-only node; set with a ×2 margin over the observed p95.
 - **SB-D / SB-C**: leave them in `warn` for 4–8 weeks and count how many alerts would have triggered retraining. The guideline target is **≤ 2 drift-triggered retrainings per month** under normal conditions.
 
@@ -185,3 +186,4 @@ reaction:
 |---|---|---|---|---|
 | 2026-11-08 | All | — → v0.1 | Created from the former quality baseline; development profile added | — |
 | 2026-11-08 | All | Spanish → English, `LS-` → `SB-` | Repository content in English (A-21) | — |
+| 2026-11-11 | SB-P01 (§11) | — → rMAE<sub>IDA</sub> reported as informational stretch reference; day-ahead remains the baseline | Maintainer's decision (A-26): IDA is a target to beat, not the first standard | Maintainer |

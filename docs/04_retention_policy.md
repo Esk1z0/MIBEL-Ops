@@ -59,7 +59,7 @@ flowchart LR
 | DB backups | 7 daily + 4 weekly + 6 monthly |
 | Logs | 500 MB per node |
 | Compute nodes | Weekly image `prune`; cache only of aliased models and the current DVC version |
-| **Ingestor buffer** | Up to **30 days or 1 GB** (whichever comes first); emptied once delivery is confirmed. Alert at 80 % (when connected) |
+| **Ingestor buffer** | Holds only what has not been delivered ([ADR-05](06_technical_decisions.md)): delivered messages deleted at once; undelivered ones kept up to **30 days or 1 GB** (configurable); quarantine 24 h; no raw payloads. Only the manager keeps data for real |
 
 ## 5. Disk budget
 `storage.budget_gb` = **200 GB** by default (of the 350 GB free), leaving room for the system and other uses.

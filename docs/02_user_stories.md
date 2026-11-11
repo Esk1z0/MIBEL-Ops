@@ -67,7 +67,7 @@ Acceptance:
 ### US-03 · Lightweight ingestor with pluggable connectors
 **As** the manager **I want** to receive only valid data from each ingestor, each source on its own topic, **so that** adding sources breaks nothing.
 - v1 connectors: ESIOS, OMIE, Open-Meteo, MIBGAS and REData (fallback).
-- Edge validation, quarantine, 30-day / 1 GB SQLite buffer, `systemd`.
+- Edge validation, quarantine, SQLite buffer for undelivered messages (30 days / 1 GB by default), `systemd`. Design: [ADR-05](06_technical_decisions.md) · code: [nodes/ingestor/](../nodes/ingestor/README.md).
 
 Acceptance:
 ```gherkin

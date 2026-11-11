@@ -1,7 +1,7 @@
 # Data Gates (DG)
 
-> Framework: [README](README.md) · Sources: [05_data_sources.md](../05_data_sources.md) · Configuration: `config/quality/data_gates.yaml`
-> Version 0.1 · all criteria **Provisional** unless stated otherwise.
+> Framework: [README](README.md) · Sources: [05_data_sources.md](../05_data_sources.md) · Configuration: DG-E in [nodes/ingestor/config/quality.yaml](../../nodes/ingestor/config/quality.yaml) (per node, ADR-05) · DG-G/D/P in `config/quality/data_gates.yaml`
+> Version 0.2 · all criteria **Provisional** unless stated otherwise.
 
 ## 1. Purpose
 Ensure that **no broken or misleading data** reaches the database, a training dataset or a prediction. There are **four gates**, one at each point of the data's journey:
@@ -23,13 +23,13 @@ flowchart LR
 
 | Gate | Where | When | Tool | On failure (`block`) |
 |---|---|---|---|---|
-| **DG-E** Edge | Ingestor | Every reading | Pydantic + `mibel_common.rules` | Data goes to local quarantine and its reason to `mibel.dlq` |
+| **DG-E** Edge | Ingestor | Every new or revised reading | `mibel_ingestor.gates` (rules from the node's `quality.yaml`) | Data goes to local quarantine and its reason to `mibel.dlq` |
 | **DG-G** Batch | Manager | Every 15-min window | Great Expectations | Data goes to the DLQ or is stored with a `quality_flag` |
 | **DG-D** Dataset | Compute node (before training) | Every training Job | Great Expectations + point-in-time test | The Job ends without training and reports it |
 | **DG-P** Prediction | Compute node (service) | Every window, **per segment** | `mibel_common` rules | That segment is not published (`SkippedWindow` with reason) |
 
 ## 2. DG-E · Edge gate (ingestor)
-Lightweight rules: they must run on the Raspberry Pi 3B+.
+Lightweight rules: they must run on the Raspberry Pi 3B+. The ingestor's run mode picks the profile: `pro` and `test` → production, `dev` → development (ADR-05).
 
 | ID | What it checks | Development | Production | Mode (dev / prod) | Status |
 |---|---|---|---|---|---|
@@ -43,14 +43,15 @@ Lightweight rules: they must run on the Raspberry Pi 3B+.
 | DG-E08 | Temperature | −30 – 50 °C | −30 – 50 °C | block / block | Provisional |
 | DG-E09 | Cloud cover | 0 – 100 % | 0 – 100 % | block / block | Fixed |
 | DG-E10 | Peninsular demand | 10,000 – 50,000 MW | 10,000 – 50,000 MW | block / block | Provisional |
-| DG-E11 | Generation by technology | ≥ 0 and ≤ installed capacity × 1.05 | ≥ 0 and ≤ installed capacity × 1.05 | warn / block | Provisional |
+| DG-E11 | Generation by technology: ≥ −1 % of installed capacity for technologies that consume (thermal, storage), ≥ 0 for the rest; ≤ installed capacity × 1.05 | −1 % / × 1.05 | −1 % / × 1.05 | warn / block | Provisional |
 | DG-E12 | Day-ahead and IDA price (harmonised market limits, [VERIFY] current values) | −500 – 4,000 €/MWh | −500 – 4,000 €/MWh | block / block | Provisional |
 | DG-E13 | Continuous intraday price (technical limits, [VERIFY]) | −9,999 – 9,999 €/MWh | −9,999 – 9,999 €/MWh | block / block | Provisional |
 | DG-E14 | Gas price (MIBGAS) | 0 – 500 €/MWh | 0 – 500 €/MWh | block / block | Provisional |
 | DG-E15 | Normalised units (MW, €/MWh, m/s, W/m²) | exact | exact | block / block | Fixed |
+| DG-E16 | OMIE continuous intraday: a period with max = min = VWAP = 0.00 means **no trades** and is treated as missing (not a 0 €/MWh price) | applied | applied | block / block | Provisional |
 
 > **Negative prices are valid** (solar surplus). No rule may reject a price just for being negative.
-> Installed capacity (DG-E11) is read from REData once a month; it is not hard-coded.
+> Installed capacity (DG-E11) is read from REData (`potencia-instalada`); it is not hard-coded. [VERIFY] the endpoint returned HTTP 500 on 2026-11-11: until it works, DG-E11 checks only the sign.
 
 ## 3. DG-G · Batch gate (manager)
 Checks what a single data point cannot reveal: completeness, freshness, consistency between variables and temporal anomalies.
@@ -98,7 +99,7 @@ Evaluated **on every window and separately for each segment**. If a segment fail
 | DG-P06 | Critical features of the segment present (list in configuration) | both | 100 % | 100 % | warn / block | Provisional |
 
 Default critical features:
-- **Nowcast**: `demand_real`, `renewable_deviation`, `price_continuous_last`.
+- **Nowcast**: `demand_real`, `renewable_deviation`, `price_ida_latest`. The continuous price is published on D+1 (~03:00), so it is never available in real time: the target keeps being the real continuous VWAP, the latest IDA is the real-time reference, and the previous day's continuous price (`price_continuous_d1`) is an optional feature and the basis of the daily checks.
 - **Forecast**: `wind_forecast`, `solar_forecast`, `weather`, `price_day_ahead`.
 - A new segment (e.g. `extended`) inherits the `segment_defaults` values.
 
@@ -130,7 +131,7 @@ segment_defaults:                    # for new segments
   DG-P02: {development: {value: 120, mode: warn}, production: {value: 60, mode: block}}
   DG-P03: {development: {value: 6,   mode: warn}, production: {value: 3,  mode: block}}
 critical_features:
-  nowcast:  [demand_real, renewable_deviation, price_continuous_last]
+  nowcast:  [demand_real, renewable_deviation, price_ida_latest]
   forecast: [wind_forecast, solar_forecast, weather, price_day_ahead]
 ```
 
@@ -144,3 +145,7 @@ critical_features:
 |---|---|---|---|---|
 | 2026-11-08 | All | — → v0.1 | Document created from the former quality baseline | — |
 | 2026-11-08 | All | Spanish → English, `CD-` → `DG-` | Repository content in English (A-21) | — |
+| 2026-11-11 | DG-E11 | ≥ 0 → ≥ −1 % of installed capacity (thermal, storage) | Small legitimate negative values (auxiliary consumption) seen in REData (docs/05 §7.2) | Maintainer |
+| 2026-11-11 | DG-E16 | — → new (no-trade periods → missing) | OMIE writes 0.00 when a period has no trades (docs/05 §7.2) | Maintainer |
+| 2026-11-11 | DG-P06 | nowcast `price_continuous_last` → `price_ida_latest` | The continuous price only exists on D+1 (docs/05 §7.1) | Maintainer |
+| 2026-11-11 | DG-E (all) | `config/quality/data_gates.yaml` → `nodes/ingestor/config/quality.yaml` | Per-node quality files, ingestor deployable alone (ADR-05) | Maintainer |
