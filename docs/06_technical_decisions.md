@@ -338,7 +338,7 @@ Ingestors run on low-power machines (Raspberry Pi 3B+ with Ubuntu Server 64-bit 
 | Topic | Decision |
 |---|---|
 | Style | **Lightweight hexagonal, focused on efficiency**: a small core (model, gates, pipeline, scheduler) and replaceable adapters (connectors, HTTP, SQLite store, sinks, metrics). Plain dataclasses with `__slots__`; **no pandas, no pydantic** in the node |
-| Extensibility | **Connector registry inside the package, enabled by configuration**. A source is one module `connectors/<source>.py` with a `@register` class plus its YAML block. Only enabled connectors are imported. `enabled: auto` switches a source on when its secret exists (ENTSO-E is implemented and waits for `ENTSOE_TOKEN`) |
+| Extensibility | **Connector registry inside the package, enabled by configuration**. A source is one module `connectors/<source>.py` with a `@register` class plus its YAML block. Only enabled connectors are imported. `enabled: auto` switches a source on when its secret exists (ENTSO-E switched on this way, with no code change, when its token arrived on 2026-11-18) |
 | Granularity | **One connector per source**, so sources can be swapped or preferred over one another. The datasets of a source (e.g. ESIOS indicators) are declared in YAML: adding one is a configuration change |
 | Template | Every connector implements `requests → download → parse`. **Live capture and backfill share the same path**; only the window changes and each batch is tagged `mode: live` or `mode: backfill` |
 | Concurrency | Synchronous code and a **small thread pool** (3 workers) |
@@ -389,6 +389,7 @@ One Kafka message per (source, dataset, fetch) batch on `mibel.raw.<source>`, ke
 | Measure | Value | Notes |
 |---|---|---|
 | Real pass over the 18 enabled datasets (`once`, test mode) | 18/18 ok · 0 rejected · ~36 s wall · **1.4 s CPU** | 1.0 s of it is parsing MIBGAS's 3.3 MB Excel → its cadence lowered to 12 h |
+| Same pass with ENTSO-E enabled, 21 datasets (2026-11-18) | 21/21 ok · 0 rejected · 3,195 observations · ~60 s wall · **1.6 s CPU** · 69 MB RSS | ENTSO-E answers slowly (~8 s per request), almost no CPU |
 | Peak memory | **68–71 MB** RSS | Limit 200 MB (NFR-02) |
 | Idle service (21 jobs loaded) | **0.008 % CPU** | |
 | Offline benchmark (synthetic, all 21 datasets) | 93 ms CPU · ~70,000 observations per CPU second | Repeated poll with no changes: ~4× cheaper |

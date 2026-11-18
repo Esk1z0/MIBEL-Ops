@@ -125,7 +125,7 @@
 | The manager is a single point of failure | Short buffer on ingestors + backfill from the sources; backups; distributed manager as future work |
 | No compute nodes means no predictions | Accepted (A-05); coverage is measured and displayed |
 | *Leakage* in intraday features | `available_at` model + automatic point-in-time test |
-| ESIOS and ENTSO-E tokens pending approval | Request them in R0; REData as a token-free fallback |
+| ~~ESIOS and ENTSO-E tokens pending approval~~ | Resolved: both tokens received (ENTSO-E on 2026-11-18); REData stays as a token-free fallback |
 | Artifact growth | Retention policy with lineage protection |
 
 ## 9. Future work

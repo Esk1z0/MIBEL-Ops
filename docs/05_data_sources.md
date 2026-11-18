@@ -204,6 +204,16 @@ Code: [nodes/ingestor/](../nodes/ingestor/README.md) · design: ADR-05 in [06_te
 | Change detection | A second pass only sends new or revised values (e.g. 1 of 36 demand values) | Less traffic and CPU on the Pi |
 | Volume | ~110 bytes per observation in batches | — |
 
+### 7.4 ENTSO-E with token (2026-11-18, development desktop PC)
+| Finding | Detail | Action |
+|---|---|---|
+| Exploration notebook | 27 of 27 datasets OK, including ENTSO-E flows (A11) and actual generation per type (A75) | — |
+| Ingestor connector | `flow_fr_es`, `flow_es_fr`, `flow_pt_es`: 3/3 jobs `ok`, 273 observations at 15 min, 0 rejected | Enabled by `enabled: auto` as soon as `ENTSOE_TOKEN` exists |
+| Curve compression | Documents use curve type A03: repeated values are omitted and must be forward-filled (the notebook's raw parser shows fewer rows) | Done in the connector (`A03_forward_fill` lineage step) |
+| Latency | FR→ES flows arrived ~4 h behind ES→FR and PT→ES in the same request window | `available_at` = first seen in live mode, so features only see what had arrived |
+| Response time | ~8 s per request, negligible CPU | Hourly cadence is enough |
+| Actual generation per type (A75) | Works, but ESIOS already provides real-time wind and PV | Not added to the ingestor for now |
+
 ## Sources consulted
 - [OMIE · File access](https://www.omie.es/es/file-access-list)
 - [OMIE · Public information file model](https://www.omie.es/sites/default/files/2025-03/formato_ficheros_inf_pub_136.pdf)

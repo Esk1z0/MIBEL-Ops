@@ -29,7 +29,7 @@
 
 ### SP-01 · API and token exploration
 **As** the team **we want** to confirm latencies, indicator IDs and source formats **so that** connectors are designed on real data rather than assumptions.
-- [ ] ESIOS and ENTSO-E tokens requested and received.
+- [x] ESIOS and ENTSO-E tokens requested and received (ENTSO-E: 2026-11-18).
 - [ ] Real publication latency of the continuous price (OMIE and ESIOS) measured and documented.
 - [ ] ESIOS indicator ID list finalised.
 - [ ] RAM test of the connectors on the Pi.
