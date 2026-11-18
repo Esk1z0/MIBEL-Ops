@@ -246,7 +246,8 @@ def load(config_dir: Path | None = None, mode: str | None = None,
         node_id = f"{mode}-ingestor"
 
     svc, http, sink, buf, met = (data.get(k, {}) for k in ("service", "http", "sink", "buffer", "metrics"))
-    sink_type = str(sink.get("type", "kafka"))
+    raw_type = sink.get("type", "kafka")
+    sink_type = "null" if raw_type is None else str(raw_type)   # YAML reads `null` as None
     bootstrap = os.environ.get("MIBEL_KAFKA_BOOTSTRAP") or None
     if sink_type == "kafka" and not bootstrap:
         raise ConfigError("sink.type is kafka but MIBEL_KAFKA_BOOTSTRAP is not set "

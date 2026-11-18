@@ -94,3 +94,9 @@ def test_env_file_loader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     env.write_text("# comment\nESIOS_TOKEN='abc'\nexport AEMET_API_KEY=xyz\n")
     settings.load_env_file(env)
     assert settings.secret("ESIOS_TOKEN") == "abc" and settings.secret("AEMET_API_KEY") == "xyz"
+
+
+def test_null_sink_from_set_argument() -> None:
+    # `--set sink.type=null` is parsed as YAML, where `null` means None
+    s = settings.load(CONFIG_DIR, "test", settings.parse_set_args(["sink.type=null"]))
+    assert s.sink.type == "null"
