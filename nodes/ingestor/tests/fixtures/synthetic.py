@@ -1,7 +1,7 @@
 """Synthetic payloads in the exact wire format of each source (invented values, no real market data).
 
-Used by the unit tests and by the offline benchmark (benchmarks/bench.py), so the same parsing work
-can be measured on any machine without network access.
+Used by the unit tests and by the offline benchmark (benchmarks/bench.py), so the same parsing work can
+be measured on any machine without network access.
 """
 
 from __future__ import annotations
@@ -9,113 +9,198 @@ from __future__ import annotations
 import io
 import json
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, NamedTuple
+from zoneinfo import ZoneInfo
 
+# --------------------------------------------------------------------------- constants
 UTC = timezone.utc
+MADRID = ZoneInfo("Europe/Madrid")
+ESIOS_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+ENTSOE_TIME_FORMAT = "%Y-%m-%dT%H:%MZ"
 
 
-def _periods(day: date, tz: object, minutes: int = 15) -> int:
-    from zoneinfo import ZoneInfo
-    z = tz if isinstance(tz, ZoneInfo) else ZoneInfo("Europe/Madrid")
-    start = datetime(day.year, day.month, day.day, tzinfo=z)
-    end = datetime.combine(day + timedelta(days=1), datetime.min.time(), z)
-    # subtract in UTC: aware datetimes sharing a tzinfo are subtracted as wall-clock times
-    return int((end.astimezone(UTC) - start.astimezone(UTC)).total_seconds() // (minutes * 60))
+# --------------------------------------------------------------------------- types
+class EsiosPoint(NamedTuple):
+    """One ESIOS value: when, which geography and the value (None = missing)."""
+
+    moment: datetime
+    geo_name: str
+    value: float | None
 
 
+# --------------------------------------------------------------------------- public API
 def omie_marginal(day: date, *, periods: int | None = None, header: str = "MARGINALPDBC;") -> bytes:
-    n = periods or _periods(day, None)
+    """A day-ahead/IDA file: ``year;month;day;period;PT;ES;`` with one line per period."""
+    period_count = periods or count_periods(day)
     lines = [header]
-    for p in range(1, n + 1):
-        es = round(80 + 40 * math.sin(p / n * 2 * math.pi), 2)
-        lines.append(f"{day.year};{day.month:02d};{day.day:02d};{p};{es + 1};{es};")
+    for period in range(1, period_count + 1):
+        spain_price = round(80 + 40 * math.sin(period / period_count * 2 * math.pi), 2)
+        lines.append(f"{day.year};{day.month:02d};{day.day:02d};{period};{spain_price + 1};{spain_price};")
     lines.append("*")
     return ("\r\n".join(lines) + "\r\n").encode("latin-1")
 
 
-def omie_continuous(day: date, *, emitted: datetime | None = None, no_trade: set[int] = frozenset({3}),
-                    periods: int | None = None) -> bytes:
-    n = periods or _periods(day, None)
+def omie_continuous(
+    day: date,
+    *,
+    emitted: datetime | None = None,
+    no_trade: frozenset[int] | set[int] = frozenset({3}),
+    periods: int | None = None,
+) -> bytes:
+    """A continuous-market file with emission time, decimal commas and some no-trade periods."""
+    period_count = periods or count_periods(day)
     emitted = emitted or datetime(day.year, day.month, day.day, 2, 47) + timedelta(days=1)
-    lines = [f"Precios del mercado intradiario continuo - {emitted:%d/%m/%Y - %H:%M}",
-             "Año;Mes;Día;Periodo;Máximo ES;Máximo PT;Mínimo ES;Mínimo PT;Medio ES;Medio PT;"]
-
-    def c(x: float) -> str:
-        return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-    for p in range(1, n + 1):
-        if p in no_trade:
-            vals = ["0,00"] * 6
-        else:
-            avg = 95 + 30 * math.cos(p / n * 2 * math.pi)
-            vals = [c(avg + 20), c(avg + 21), c(avg - 15), c(avg - 14), c(avg), c(avg + 0.5)]
-        lines.append(f"{day.year};{day.month:02d};{day.day:02d};{p};" + ";".join(vals) + ";")
+    lines = [
+        f"Precios del mercado intradiario continuo - {emitted:%d/%m/%Y - %H:%M}",
+        "Año;Mes;Día;Periodo;Máximo ES;Máximo PT;Mínimo ES;Mínimo PT;Medio ES;Medio PT;",
+    ]
+    for period in range(1, period_count + 1):
+        prices = ["0,00"] * 6 if period in no_trade else _continuous_prices(period, period_count)
+        lines.append(f"{day.year};{day.month:02d};{day.day:02d};{period};" + ";".join(prices) + ";")
     return ("\r\n".join(lines) + "\r\n").encode("latin-1")
 
 
-def esios(points: list[tuple[datetime, str, float | None]]) -> bytes:
-    values = [{"value": v, "datetime_utc": t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "datetime": t.isoformat(), "geo_name": g, "geo_id": 8741} for t, g, v in points]
+def esios(points: list[EsiosPoint]) -> bytes:
+    """An ESIOS indicator response with the given values."""
+    values = [_esios_value(point) for point in points]
     return json.dumps({"indicator": {"id": 1293, "name": "synthetic", "values": values}}).encode()
 
 
 def redata(series: dict[str, list[tuple[datetime, float]]]) -> bytes:
-    included = [{"type": title, "attributes": {"title": title, "values": [
-        {"value": v, "percentage": 1, "datetime": t.isoformat(timespec="milliseconds")} for t, v in pts]}}
-        for title, pts in series.items()]
+    """A REData widget response with one series per title."""
+    included = [_redata_series(title, points) for title, points in series.items()]
     return json.dumps({"data": {"type": "synthetic"}, "included": included}).encode()
 
 
 def open_meteo(start: datetime, hours: int, params: list[str]) -> bytes:
-    times = [(start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(hours)]
-    hourly: dict[str, list[object]] = {"time": times}
-    for i, p in enumerate(params):
-        if "wind" in p:
-            hourly[p] = [round(6 + i + 2 * math.sin(h / 6), 2) for h in range(hours)]
-        elif "radiation" in p:
-            hourly[p] = [max(0.0, round(700 * math.sin((h % 24 - 6) / 12 * math.pi), 1)) for h in range(hours)]
-        elif "cloud" in p:
-            hourly[p] = [h % 100 for h in range(hours)]
-        else:
-            hourly[p] = [round(12 + 5 * math.sin(h / 24 * 2 * math.pi), 1) for h in range(hours)]
+    """An Open-Meteo hourly response; the last parameter has one missing value, as the API sends them."""
+    times = [(start + timedelta(hours=hour)).strftime("%Y-%m-%dT%H:%M") for hour in range(hours)]
+    hourly: dict[str, list[Any]] = {"time": times}
+    for index, param in enumerate(params):
+        hourly[param] = [_open_meteo_value(param, index, hour) for hour in range(hours)]
     if hours > 2:
-        hourly[params[-1]][1] = None                       # a missing value, as Open-Meteo sends them
+        hourly[params[-1]][1] = None
     return json.dumps({"latitude": 41.8, "longitude": -1.5, "hourly": hourly}).encode()
 
 
 def mibgas(days: list[date], sheet: str = "MIBGAS Indexes") -> bytes:
+    """A small MIBGAS workbook with the index sheet (the real yearly file is ~3.3 MB)."""
     from openpyxl import Workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Trading Data"
-    idx = wb.create_sheet(sheet)
-    idx.append(["Delivery day", "MIBGAS-ES Index\n[EUR/MWh]", "MIBGAS PVB Average Price Index Day-Ahead\n[EUR/MWh]"])
-    for i, d in enumerate(days):
-        idx.append([datetime(d.year, d.month, d.day), 30 + i * 0.1, 30.5 + i * 0.1])
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+
+    workbook = Workbook()
+    workbook.active.title = "Trading Data"
+    index_sheet = workbook.create_sheet(sheet)
+    index_sheet.append([
+        "Delivery day",
+        "MIBGAS-ES Index\n[EUR/MWh]",
+        "MIBGAS PVB Average Price Index Day-Ahead\n[EUR/MWh]",
+    ])
+    for i, day in enumerate(days):
+        index_sheet.append([datetime(day.year, day.month, day.day), 30 + i * 0.1, 30.5 + i * 0.1])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def aemet(start: datetime, hours: int, station: str = "9311X") -> bytes:
-    recs = [{"idema": station, "fint": (start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%S+0000"),
-             "vv": round(4 + h % 5 * 0.7, 1), "ta": 10 + h % 7, "hr": 70} for h in range(hours)]
-    recs[0].pop("vv")                                      # stations sometimes omit a variable
-    return json.dumps(recs).encode("latin-1")
+    """AEMET station records; the first one omits the wind, as stations sometimes do."""
+    records = [_aemet_record(start + timedelta(hours=hour), hour, station) for hour in range(hours)]
+    records[0].pop("vv")
+    return json.dumps(records).encode("latin-1")
 
 
 def entsoe(start: datetime, points: list[float | None], *, curve: str = "A01", minutes: int = 60) -> bytes:
+    """An ENTSO-E publication document; None points are omitted (as in A03 curves)."""
     end = start + timedelta(minutes=minutes * len(points))
-    pts = "".join(f"<Point><position>{i}</position><quantity>{v}</quantity></Point>"
-                  for i, v in enumerate(points, 1) if v is not None)
-    fmt = "%Y-%m-%dT%H:%MZ"
-    return (f'<?xml version="1.0" encoding="UTF-8"?>'
-            f'<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3">'
-            f"<TimeSeries><curveType>{curve}</curveType><Period><timeInterval><start>{start:{fmt}}</start>"
-            f"<end>{end:{fmt}}</end></timeInterval><resolution>PT{minutes}M</resolution>{pts}</Period>"
-            f"</TimeSeries></Publication_MarketDocument>").encode()
+    point_xml = "".join(
+        f"<Point><position>{position}</position><quantity>{value}</quantity></Point>"
+        for position, value in enumerate(points, 1)
+        if value is not None
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3">'
+        f"<TimeSeries><curveType>{curve}</curveType><Period><timeInterval>"
+        f"<start>{start:{ENTSOE_TIME_FORMAT}}</start><end>{end:{ENTSOE_TIME_FORMAT}}</end></timeInterval>"
+        f"<resolution>PT{minutes}M</resolution>{point_xml}</Period></TimeSeries>"
+        "</Publication_MarketDocument>"
+    ).encode()
 
 
-def entsoe_ack(reason: str = "No matching data found") -> bytes:
-    return (f'<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">'
-            f"<Reason><code>999</code><text>{reason}</text></Reason></Acknowledgement_MarketDocument>").encode()
+def entsoe_acknowledgement(reason: str = "No matching data found") -> bytes:
+    """The document ENTSO-E returns when there is no data for the query."""
+    return (
+        '<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-1:acknowledgementdocument:7:0">'
+        f"<Reason><code>999</code><text>{reason}</text></Reason></Acknowledgement_MarketDocument>"
+    ).encode()
+
+
+def count_periods(day: date, minutes: int = 15) -> int:
+    """Number of periods of a Madrid delivery day (92/96/100 quarter-hours with DST)."""
+    start = datetime.combine(day, time(0), MADRID)
+    end = datetime.combine(day + timedelta(days=1), time(0), MADRID)
+    # subtract in UTC: aware datetimes sharing a tzinfo are subtracted as wall-clock times
+    duration = end.astimezone(UTC) - start.astimezone(UTC)
+    return int(duration.total_seconds() // (minutes * 60))
+
+
+# --------------------------------------------------------------------------- private helpers
+def _spanish_number(value: float) -> str:
+    """Format a number the OMIE way: ``1.234,56``."""
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _continuous_prices(period: int, period_count: int) -> list[str]:
+    """The six price columns of one continuous period: max ES/PT, min ES/PT, VWAP ES/PT."""
+    vwap = 95 + 30 * math.cos(period / period_count * 2 * math.pi)
+    return [
+        _spanish_number(vwap + 20),
+        _spanish_number(vwap + 21),
+        _spanish_number(vwap - 15),
+        _spanish_number(vwap - 14),
+        _spanish_number(vwap),
+        _spanish_number(vwap + 0.5),
+    ]
+
+
+def _esios_value(point: EsiosPoint) -> dict[str, Any]:
+    """One item of ``indicator.values``."""
+    return {
+        "value": point.value,
+        "datetime_utc": point.moment.astimezone(UTC).strftime(ESIOS_TIME_FORMAT),
+        "datetime": point.moment.isoformat(),
+        "geo_name": point.geo_name,
+        "geo_id": 8741,
+    }
+
+
+def _redata_series(title: str, points: list[tuple[datetime, float]]) -> dict[str, Any]:
+    """One item of ``included`` with its values."""
+    values = [
+        {"value": value, "percentage": 1, "datetime": moment.isoformat(timespec="milliseconds")}
+        for moment, value in points
+    ]
+    return {"type": title, "attributes": {"title": title, "values": values}}
+
+
+def _open_meteo_value(param: str, index: int, hour: int) -> float:
+    """A plausible hourly value for a parameter (wind, radiation, cloud cover or temperature)."""
+    if "wind" in param:
+        return round(6 + index + 2 * math.sin(hour / 6), 2)
+    if "radiation" in param:
+        return max(0.0, round(700 * math.sin((hour % 24 - 6) / 12 * math.pi), 1))
+    if "cloud" in param:
+        return float(hour % 100)
+    return round(12 + 5 * math.sin(hour / 24 * 2 * math.pi), 1)
+
+
+def _aemet_record(moment: datetime, hour: int, station: str) -> dict[str, Any]:
+    """One AEMET observation record."""
+    return {
+        "idema": station,
+        "fint": moment.strftime("%Y-%m-%dT%H:%M:%S+0000"),
+        "vv": round(4 + hour % 5 * 0.7, 1),
+        "ta": 10 + hour % 7,
+        "hr": 70,
+    }

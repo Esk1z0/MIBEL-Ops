@@ -1,219 +1,264 @@
-"""Contract tests per connector: synthetic payload in the source's wire format -> observations."""
+"""Contract tests per connector: synthetic payload in the source's wire format → observations."""
 
 from __future__ import annotations
 
 import itertools
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from mibel_ingestor.connectors import available, get
-from mibel_ingestor.model import UTC, ContractError, Mode, NotAvailable, Request, Window
+from mibel_ingestor.connectors import available_sources, get_connector_class
+from mibel_ingestor.model import UTC, CaptureMode, ContractError, NotAvailable, Request, Window
 from mibel_ingestor.settings import ConfigError
 
 import synthetic
-from conftest import TZ, make_connector
+from conftest import MADRID, make_connector
+
+QUARTER_HOUR = timedelta(minutes=15)
 
 
-def req(**meta: object) -> Request:
+def fake_request(**meta: object) -> Request:
+    """A request whose only relevant part for parsing is its ``meta``."""
     return Request("https://example.invalid", meta=dict(meta))
 
 
+def utc_window(start: datetime, end: datetime, mode: CaptureMode = CaptureMode.LIVE) -> Window:
+    """A window between two UTC datetimes."""
+    return Window(start, end, mode)
+
+
+# --- registry ---
 def test_registry_lists_every_source_module() -> None:
-    assert available() == ["aemet", "entsoe", "esios", "mibgas", "omie", "open_meteo", "redata"]
+    assert available_sources() == ["aemet", "entsoe", "esios", "mibgas", "omie", "open_meteo", "redata"]
 
 
 def test_unknown_source_is_a_config_error() -> None:
     with pytest.raises(ConfigError, match="unknown source"):
-        get("nope")
+        get_connector_class("nope")
 
 
-# ------------------------------------------------------------------------------------- OMIE
+# --- OMIE ---
 def test_omie_day_ahead_quarter_hours_in_utc() -> None:
-    conn = make_connector("omie")
-    ds = conn.datasets["day_ahead"]
-    res = conn.parse(ds, req(file="x"), synthetic.omie_marginal(date(2026, 11, 10)))
-    es = [o for o in res.observations if o.node == "ES"]
-    assert len(es) == 96 and len(res.observations) == 192
-    assert es[0].event_time == datetime(2026, 11, 9, 23, 0, tzinfo=UTC)      # 00:00 local (CET)
-    assert es[1].event_time - es[0].event_time == timedelta(minutes=15)
-    assert {o.variable for o in es} == {"price_day_ahead"}
+    connector = make_connector("omie")
+    result = connector.parse(
+        connector.datasets["day_ahead"],
+        fake_request(file="x"),
+        synthetic.omie_marginal(date(2026, 11, 10)),
+    )
+    spain = [observation for observation in result.observations if observation.node == "ES"]
+    assert len(spain) == 96
+    assert len(result.observations) == 192
+    assert spain[0].event_time == datetime(2026, 11, 9, 23, 0, tzinfo=UTC)  # 00:00 local (CET)
+    assert spain[1].event_time - spain[0].event_time == QUARTER_HOUR
+    assert {observation.variable for observation in spain} == {"price_day_ahead"}
 
 
-@pytest.mark.parametrize(("day", "periods"), [(date(2026, 10, 25), 100), (date(2026, 3, 29), 92)])
-def test_omie_dst_days_are_continuous(day: date, periods: int) -> None:
-    conn = make_connector("omie")
-    res = conn.parse(conn.datasets["day_ahead"], req(), synthetic.omie_marginal(day))
-    es = [o.event_time for o in res.observations if o.node == "ES"]
-    assert len(es) == periods
-    assert all(b - a == timedelta(minutes=15) for a, b in itertools.pairwise(es))
-    assert es[-1] + timedelta(minutes=15) == datetime.combine(day + timedelta(days=1), datetime.min.time(),
-                                                             TZ).astimezone(UTC)
+@pytest.mark.parametrize(("day", "period_count"), [(date(2026, 10, 25), 100), (date(2026, 3, 29), 92)])
+def test_omie_dst_days_are_continuous(day: date, period_count: int) -> None:
+    connector = make_connector("omie")
+    result = connector.parse(connector.datasets["day_ahead"], fake_request(), synthetic.omie_marginal(day))
+    starts = [observation.event_time for observation in result.observations if observation.node == "ES"]
+    next_local_midnight = datetime.combine(day + timedelta(days=1), time(0), MADRID).astimezone(UTC)
+    assert len(starts) == period_count
+    assert all(later - earlier == QUARTER_HOUR for earlier, later in itertools.pairwise(starts))
+    assert starts[-1] + QUARTER_HOUR == next_local_midnight
 
 
 def test_omie_hourly_files_before_october_2025() -> None:
-    conn = make_connector("omie")
-    res = conn.parse(conn.datasets["day_ahead"], req(), synthetic.omie_marginal(date(2025, 6, 1), periods=24))
-    es = [o.event_time for o in res.observations if o.node == "ES"]
-    assert es[1] - es[0] == timedelta(hours=1)
+    connector = make_connector("omie")
+    payload = synthetic.omie_marginal(date(2025, 6, 1), periods=24)
+    result = connector.parse(connector.datasets["day_ahead"], fake_request(), payload)
+    starts = [observation.event_time for observation in result.observations if observation.node == "ES"]
+    assert starts[1] - starts[0] == timedelta(hours=1)
 
 
 def test_omie_ida_session_variable() -> None:
-    conn = make_connector("omie")
-    res = conn.parse(conn.datasets["intraday_auctions"], req(session="02"), synthetic.omie_marginal(date(2026, 11, 10)))
-    assert {o.variable for o in res.observations} == {"price_ida2"}
+    connector = make_connector("omie")
+    result = connector.parse(
+        connector.datasets["intraday_auctions"],
+        fake_request(session="02"),
+        synthetic.omie_marginal(date(2026, 11, 10)),
+    )
+    assert {observation.variable for observation in result.observations} == {"price_ida2"}
 
 
 def test_omie_continuous_no_trade_and_emission_time() -> None:
-    conn = make_connector("omie")
-    emitted = datetime(2026, 11, 11, 2, 47)
-    res = conn.parse(conn.datasets["continuous"], req(),
-                     synthetic.omie_continuous(date(2026, 11, 10), emitted=emitted, no_trade={3, 7}))
-    assert res.steps["DG-E16:no_trade_to_missing"] == 4                    # 2 periods x 2 zones
-    vwap = [o for o in res.observations if o.variable == "price_continuous_vwap" and o.node == "ES"]
-    assert len(vwap) == 94
-    assert all(o.available_at == emitted.replace(tzinfo=TZ).astimezone(UTC) for o in vwap)
-    assert {o.variable for o in res.observations} == {"price_continuous_vwap", "price_continuous_max",
-                                                      "price_continuous_min"}
+    connector = make_connector("omie")
+    emitted_local = datetime(2026, 11, 11, 2, 47)
+    payload = synthetic.omie_continuous(date(2026, 11, 10), emitted=emitted_local, no_trade={3, 7})
+    result = connector.parse(connector.datasets["continuous"], fake_request(), payload)
+    assert result.steps["DG-E16:no_trade_to_missing"] == 4  # 2 periods x 2 zones
+    spain_vwap = [
+        observation for observation in result.observations
+        if observation.variable == "price_continuous_vwap" and observation.node == "ES"
+    ]
+    emitted_utc = emitted_local.replace(tzinfo=MADRID).astimezone(UTC)
+    assert len(spain_vwap) == 94
+    assert all(observation.available_at == emitted_utc for observation in spain_vwap)
+    assert {observation.variable for observation in result.observations} == {
+        "price_continuous_vwap",
+        "price_continuous_max",
+        "price_continuous_min",
+    }
 
 
 def test_omie_html_page_breaks_the_contract() -> None:
-    conn = make_connector("omie")
+    connector = make_connector("omie")
     with pytest.raises(ContractError):
-        conn.parse(conn.datasets["day_ahead"], req(), b"<!DOCTYPE html><html></html>")
+        connector.parse(connector.datasets["day_ahead"], fake_request(), b"<!DOCTYPE html><html></html>")
 
 
 def test_omie_requests_one_file_per_local_day_and_session() -> None:
-    conn = make_connector("omie")
-    w = Window(datetime(2026, 11, 10, 23, 0, tzinfo=UTC), datetime(2026, 11, 12, 23, 0, tzinfo=UTC))
-    files = [r.params["filename"] for r in conn.requests(conn.datasets["intraday_auctions"], w)]
-    assert files[:3] == ["marginalpibc_2026111101.1", "marginalpibc_2026111102.1", "marginalpibc_2026111103.1"]
-    assert len(files) == 6
+    connector = make_connector("omie")
+    window = utc_window(datetime(2026, 11, 10, 23, 0, tzinfo=UTC), datetime(2026, 11, 12, 23, 0, tzinfo=UTC))
+    requests = connector.requests(connector.datasets["intraday_auctions"], window)
+    filenames = [request.params["filename"] for request in requests]
+    assert filenames[:3] == ["marginalpibc_2026111101.1", "marginalpibc_2026111102.1", "marginalpibc_2026111103.1"]
+    assert len(filenames) == 6
 
 
-# ------------------------------------------------------------------------------------ ESIOS
+# --- ESIOS ---
 def test_esios_geos_split_one_response_into_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ESIOS_TOKEN", "dummy")
-    conn = make_connector("esios")
-    ds = conn.datasets["price_day_ahead"]
-    t = datetime(2026, 11, 11, 10, tzinfo=UTC)
-    payload = synthetic.esios([(t, "España", 90.0), (t, "Francia", 70.0), (t, "Portugal", 90.0), (t, "España", None)])
-    res = conn.parse(ds, req(), payload)
-    assert sorted((o.node, o.value) for o in res.observations) == [("ES", 90.0), ("FR", 70.0)]
-    assert res.steps == {"filter:geo_not_configured": 1, "null_dropped": 1}
+    connector = make_connector("esios")
+    moment = datetime(2026, 11, 11, 10, tzinfo=UTC)
+    payload = synthetic.esios([
+        synthetic.EsiosPoint(moment, "España", 90.0),
+        synthetic.EsiosPoint(moment, "Francia", 70.0),
+        synthetic.EsiosPoint(moment, "Portugal", 90.0),
+        synthetic.EsiosPoint(moment, "España", None),
+    ])
+    result = connector.parse(connector.datasets["price_day_ahead"], fake_request(), payload)
+    values_by_node = sorted((observation.node, observation.value) for observation in result.observations)
+    assert values_by_node == [("ES", 90.0), ("FR", 70.0)]
+    assert result.steps == {"filter:geo_not_configured": 1, "null_dropped": 1}
 
 
 def test_esios_request_is_secret_and_token_not_in_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ESIOS_TOKEN", "super-secret")
-    conn = make_connector("esios")
-    w = Window(datetime(2026, 11, 11, 8, tzinfo=UTC), datetime(2026, 11, 11, 10, tzinfo=UTC))
-    (r,) = conn.requests(conn.datasets["demand_real"], w)
-    assert r.secret and "super-secret" not in str(r.meta) and "super-secret" not in r.url
+    connector = make_connector("esios")
+    window = utc_window(datetime(2026, 11, 11, 8, tzinfo=UTC), datetime(2026, 11, 11, 10, tzinfo=UTC))
+    (request,) = connector.requests(connector.datasets["demand_real"], window)
+    assert request.secret
+    assert "super-secret" not in str(request.meta)
+    assert "super-secret" not in request.url
 
 
 def test_esios_without_token_fails_cleanly() -> None:
-    conn = make_connector("esios")
-    w = Window(datetime(2026, 11, 11, 8, tzinfo=UTC), datetime(2026, 11, 11, 10, tzinfo=UTC))
+    connector = make_connector("esios")
+    window = utc_window(datetime(2026, 11, 11, 8, tzinfo=UTC), datetime(2026, 11, 11, 10, tzinfo=UTC))
     with pytest.raises(ConfigError, match="ESIOS_TOKEN"):
-        conn.requests(conn.datasets["demand_real"], w)
+        connector.requests(connector.datasets["demand_real"], window)
 
 
-# ----------------------------------------------------------------------------------- REData
+# --- REData ---
 def test_redata_series_mapping() -> None:
-    conn = make_connector("redata")
-    t = datetime(2026, 11, 11, 10, 5, tzinfo=TZ)
-    res = conn.parse(conn.datasets["demand_real_time"], req(),
-                     synthetic.redata({"Real": [(t, 30000.0)], "Programada": [(t, 29000.0)]}))
-    assert [(o.variable, o.event_time) for o in res.observations] == [("demand_real", t.astimezone(UTC))]
-    assert res.steps == {"series_ignored:programada": 1}
+    connector = make_connector("redata")
+    moment = datetime(2026, 11, 11, 10, 5, tzinfo=MADRID)
+    payload = synthetic.redata({"Real": [(moment, 30000.0)], "Programada": [(moment, 29000.0)]})
+    result = connector.parse(connector.datasets["demand_real_time"], fake_request(), payload)
+    (observation,) = result.observations
+    assert observation.variable == "demand_real"
+    assert observation.event_time == moment.astimezone(UTC)
+    assert result.steps == {"series_ignored:programada": 1}
 
 
 def test_redata_error_document() -> None:
-    conn = make_connector("redata")
+    connector = make_connector("redata")
     with pytest.raises(ContractError):
-        conn.parse(conn.datasets["demand_real_time"], req(), b'{"errors": [{"code": 500}]}')
+        connector.parse(connector.datasets["demand_real_time"], fake_request(), b'{"errors": [{"code": 500}]}')
 
 
-# ------------------------------------------------------------------------------- Open-Meteo
+# --- Open-Meteo ---
 def test_open_meteo_derives_wind_at_100m_and_drops_nulls() -> None:
-    conn = make_connector("open_meteo")
-    ds = conn.datasets["forecast"]
+    connector = make_connector("open_meteo")
     params = ["wind_speed_80m", "wind_speed_120m", "direct_radiation", "diffuse_radiation", "cloud_cover",
               "temperature_2m"]
-    res = conn.parse(ds, req(node="aragon"), synthetic.open_meteo(datetime(2026, 11, 11, tzinfo=UTC), 24, params))
-    wind = [o for o in res.observations if o.variable == "wind_speed_100m"]
-    assert len(wind) == 24 and all(4 < o.value < 9 for o in wind)       # between the 80 m and 120 m inputs
-    assert res.steps["null_dropped"] == 1
-    assert {o.node for o in res.observations} == {"aragon"}
+    payload = synthetic.open_meteo(datetime(2026, 11, 11, tzinfo=UTC), 24, params)
+    result = connector.parse(connector.datasets["forecast"], fake_request(node="aragon"), payload)
+    wind = [observation for observation in result.observations if observation.variable == "wind_speed_100m"]
+    assert len(wind) == 24
+    assert all(4 < observation.value < 9 for observation in wind)  # between the 80 m and 120 m inputs
+    assert result.steps["null_dropped"] == 1
+    assert {observation.node for observation in result.observations} == {"aragon"}
 
 
 def test_open_meteo_backfill_uses_historical_forecast_api() -> None:
-    conn = make_connector("open_meteo")
-    w = Window(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC), Mode.BACKFILL)
-    reqs = conn.requests(conn.datasets["forecast"], w)
-    assert len(reqs) == 4 and all("historical-forecast" in r.url for r in reqs)
-    assert reqs[0].params["start_date"] == "2026-01-01" and reqs[0].params["end_date"] == "2026-01-31"
-    assert reqs[0].params["wind_speed_unit"] == "ms"
+    connector = make_connector("open_meteo")
+    window = utc_window(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC), CaptureMode.BACKFILL)
+    requests = connector.requests(connector.datasets["forecast"], window)
+    assert len(requests) == 4
+    assert all("historical-forecast" in request.url for request in requests)
+    assert requests[0].params["start_date"] == "2026-01-01"
+    assert requests[0].params["end_date"] == "2026-01-31"
+    assert requests[0].params["wind_speed_unit"] == "ms"
 
 
 def test_open_meteo_satellite_only_for_solar_nodes() -> None:
-    conn = make_connector("open_meteo")
-    w = Window(datetime(2026, 11, 10, tzinfo=UTC), datetime(2026, 11, 11, tzinfo=UTC))
-    assert {r.meta["node"] for r in conn.requests(conn.datasets["satellite"], w)} == {"extremadura", "andalucia"}
+    connector = make_connector("open_meteo")
+    window = utc_window(datetime(2026, 11, 10, tzinfo=UTC), datetime(2026, 11, 11, tzinfo=UTC))
+    requests = connector.requests(connector.datasets["satellite"], window)
+    assert {request.meta["node"] for request in requests} == {"extremadura", "andalucia"}
 
 
-# ----------------------------------------------------------------------------------- MIBGAS
+# --- MIBGAS ---
 def test_mibgas_workbook() -> None:
     pytest.importorskip("openpyxl")
-    conn = make_connector("mibgas")
+    connector = make_connector("mibgas")
     days = [date(2026, 11, 1) + timedelta(days=i) for i in range(5)]
-    res = conn.parse(conn.datasets["daily_index"], req(year=2026), synthetic.mibgas(days))
-    es = [o for o in res.observations if o.variable == "gas_mibgas_es_index"]
-    assert len(es) == 5 and es[0].event_time == datetime(2026, 10, 31, 23, tzinfo=UTC)
+    result = connector.parse(connector.datasets["daily_index"], fake_request(year=2026), synthetic.mibgas(days))
+    spain = [observation for observation in result.observations if observation.variable == "gas_mibgas_es_index"]
+    assert len(spain) == 5
+    assert spain[0].event_time == datetime(2026, 10, 31, 23, tzinfo=UTC)
 
 
 def test_mibgas_missing_sheet() -> None:
     pytest.importorskip("openpyxl")
-    conn = make_connector("mibgas")
+    connector = make_connector("mibgas")
+    payload = synthetic.mibgas([date(2026, 11, 1)], sheet="Other")
     with pytest.raises(ContractError, match="sheet"):
-        conn.parse(conn.datasets["daily_index"], req(), synthetic.mibgas([date(2026, 11, 1)], sheet="Other"))
+        connector.parse(connector.datasets["daily_index"], fake_request(), payload)
 
 
-# ------------------------------------------------------------------------------------ AEMET
+# --- AEMET ---
 def test_aemet_records() -> None:
-    conn = make_connector("aemet")
-    res = conn.parse(conn.datasets["stations"], req(node="aragon"),
-                     synthetic.aemet(datetime(2026, 11, 11, tzinfo=UTC), 6))
-    assert len([o for o in res.observations if o.variable == "wind_speed_station_10m"]) == 5
-    assert res.steps == {"null_dropped:vv": 1}
+    connector = make_connector("aemet")
+    payload = synthetic.aemet(datetime(2026, 11, 11, tzinfo=UTC), 6)
+    result = connector.parse(connector.datasets["stations"], fake_request(node="aragon"), payload)
+    wind = [observation for observation in result.observations if observation.variable == "wind_speed_station_10m"]
+    assert len(wind) == 5
+    assert result.steps == {"null_dropped:vv": 1}
 
 
 def test_aemet_backfill_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AEMET_API_KEY", "dummy")
-    conn = make_connector("aemet")
-    w = Window(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC), Mode.BACKFILL)
+    connector = make_connector("aemet")
+    window = utc_window(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC), CaptureMode.BACKFILL)
     with pytest.raises(NotImplementedError):
-        conn.requests(conn.datasets["stations"], w)
+        connector.requests(connector.datasets["stations"], window)
 
 
-# ---------------------------------------------------------------------------------- ENTSO-E
+# --- ENTSO-E ---
 def test_entsoe_a03_forward_fill() -> None:
-    conn = make_connector("entsoe")
-    t0 = datetime(2026, 11, 10, 23, tzinfo=UTC)
-    res = conn.parse(conn.datasets["flow_fr_es"], req(), synthetic.entsoe(t0, [100, None, None, 250], curve="A03"))
-    assert [o.value for o in res.observations] == [100, 100, 100, 250]
-    assert res.observations[3].event_time == t0 + timedelta(hours=3)
+    connector = make_connector("entsoe")
+    first_hour = datetime(2026, 11, 10, 23, tzinfo=UTC)
+    payload = synthetic.entsoe(first_hour, [100, None, None, 250], curve="A03")
+    result = connector.parse(connector.datasets["flow_fr_es"], fake_request(), payload)
+    assert [observation.value for observation in result.observations] == [100, 100, 100, 250]
+    assert result.observations[3].event_time == first_hour + timedelta(hours=3)
 
 
 def test_entsoe_acknowledgement_means_not_available() -> None:
-    conn = make_connector("entsoe")
+    connector = make_connector("entsoe")
     with pytest.raises(NotAvailable):
-        conn.parse(conn.datasets["flow_fr_es"], req(), synthetic.entsoe_ack())
+        connector.parse(connector.datasets["flow_fr_es"], fake_request(), synthetic.entsoe_acknowledgement())
 
 
 def test_entsoe_token_only_in_secret_request(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENTSOE_TOKEN", "tok")
-    conn = make_connector("entsoe")
-    w = Window(datetime(2026, 11, 10, tzinfo=UTC), datetime(2026, 11, 11, tzinfo=UTC))
-    (r,) = conn.requests(conn.datasets["flow_fr_es"], w)
-    assert r.secret and r.params["periodStart"] == "202611100000" and "tok" not in str(r.meta)
+    connector = make_connector("entsoe")
+    window = utc_window(datetime(2026, 11, 10, tzinfo=UTC), datetime(2026, 11, 11, tzinfo=UTC))
+    (request,) = connector.requests(connector.datasets["flow_fr_es"], window)
+    assert request.secret
+    assert request.params["periodStart"] == "202611100000"
+    assert "tok" not in str(request.meta)

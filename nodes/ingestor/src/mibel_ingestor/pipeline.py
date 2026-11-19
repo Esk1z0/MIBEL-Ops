@@ -1,11 +1,15 @@
-"""The single processing path, identical for live capture and backfill (only the window and the
-``mode`` tag change):
+"""The single processing path of a job, identical for live capture and backfill.
 
-    requests → download → parse → keep window → change detection (live) → available_at
-             → edge gates → batches + lineage → outbox      (rejected → quarantine + DLQ)
+Only the window and the ``mode`` tag change between both (ADR-05 §5.2)::
 
-Stage timings (wall and CPU) are measured with cheap counters so the benchmark can compare
-platforms without a profiler.
+    requests → download → parse → keep window → change detection (live only) → available_at
+             → edge gates → batches + lineage → outbox          (rejected → quarantine + DLQ)
+
+``available_at`` (when a value became known) is taken from the source when it states it, set to the
+fetch time in live mode, or estimated conservatively from the dataset's ``publication`` in backfill.
+
+Stage timings (wall and CPU) are measured with cheap counters, so the benchmark can compare platforms
+without a profiler.
 """
 
 from __future__ import annotations
@@ -17,39 +21,90 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from datetime import time as dtime
+from datetime import time as wall_time
+from enum import Enum
 from typing import Any
 
 from . import __version__, metrics
 from .connectors import Connector, Dataset
-from .gates import Context, Gates
+from .gates import Context, GateResult, Gates
 from .http import FetchError
 from .model import (
     UTC,
+    CaptureMode,
     ContractError,
-    Mode,
     NotAvailable,
     Observation,
+    OutgoingMessage,
     ParseResult,
+    Rejection,
+    Request,
     Window,
     build_batch,
     build_dlq,
-    iso,
+    to_iso,
     utc_now,
 )
-from .settings import Settings, duration
+from .settings import Settings, parse_duration
 from .store import Store
 
+# --------------------------------------------------------------------------- constants
 log = logging.getLogger("mibel_ingestor.pipeline")
-CHUNK_ROWS = 2000            # rows per Kafka message (keeps messages well below 1 MB)
+# Rows per Kafka message: keeps messages well below Kafka's 1 MB default limit
+CHUNK_ROWS = 2000
+MAX_ERROR_CHARS = 300
+CAPACITY_ROLE = "capacity"
+# Live windows start on a boundary between 1 min and 1 h, so consecutive polls ask for the same range
+MIN_FLOOR_SECONDS = 60.0
+MAX_FLOOR_SECONDS = 3600.0
+STRUCTURE_RULE = "DG-E01"
+
+
+# --------------------------------------------------------------------------- types
+class JobStatus(str, Enum):
+    """Outcome of one job run."""
+
+    OK = "ok"
+    NOT_AVAILABLE = "not_available"
+    CONTRACT_ERROR = "contract_error"
+    FETCH_ERROR = "fetch_error"
+    ERROR = "error"
+
+
+class Stage(str, Enum):
+    """Measured stages of a job."""
+
+    DOWNLOAD = "download"
+    PARSE = "parse"
+    DETECT = "detect"
+    GATES = "gates"
+    SERIALIZE = "serialize"
+
+
+class AvailableAtSource(str, Enum):
+    """Where the ``available_at`` of a batch comes from (recorded in the lineage)."""
+
+    SOURCE = "source"
+    FIRST_SEEN = "first_seen"
+    ESTIMATED = "estimated"
+
+
+@dataclass
+class StageTiming:
+    """Accumulated wall and CPU seconds of one stage."""
+
+    wall_s: float = 0.0
+    cpu_s: float = 0.0
 
 
 @dataclass
 class JobReport:
+    """What happened in one job run: status, counts per outcome and stage timings."""
+
     source: str
     dataset: str
     mode: str
-    status: str = "ok"       # ok | not_available | contract_error | fetch_error | error
+    status: JobStatus = JobStatus.OK
     error: str = ""
     requests: int = 0
     not_available: int = 0
@@ -59,189 +114,371 @@ class JobReport:
     rejected: int = 0
     messages: int = 0
     bytes: int = 0
-    stages: dict[str, list[float]] = field(default_factory=lambda: defaultdict(lambda: [0.0, 0.0]))
+    stages: dict[str, StageTiming] = field(default_factory=lambda: defaultdict(StageTiming))
 
     @property
     def succeeded(self) -> bool:
-        return self.status in ("ok", "not_available")
+        """Whether the run counts as a success (nothing published yet is not a failure)."""
+        return self.status in (JobStatus.OK, JobStatus.NOT_AVAILABLE)
+
+    def fail(self, status: JobStatus, error: str) -> None:
+        """Mark the run as failed with a short error message."""
+        self.status = status
+        self.error = error[:MAX_ERROR_CHARS]
 
     def as_dict(self) -> dict[str, Any]:
-        out = {k: v for k, v in vars(self).items() if k != "stages"}
-        out["stages"] = {k: {"wall_s": round(w, 6), "cpu_s": round(c, 6)} for k, (w, c) in self.stages.items()}
-        return out
+        """Return the report as plain JSON-ready values (used by ``once`` and the benchmark)."""
+        report = {name: value for name, value in vars(self).items() if name != "stages"}
+        report["status"] = self.status.value
+        report["stages"] = {
+            stage: {"wall_s": round(timing.wall_s, 6), "cpu_s": round(timing.cpu_s, 6)}
+            for stage, timing in self.stages.items()
+        }
+        return report
 
 
+# --------------------------------------------------------------------------- public API
 @contextmanager
-def timed(report: JobReport, stage: str) -> Iterator[None]:
-    w0, c0 = time.perf_counter(), time.process_time()
+def measure_stage(report: JobReport, stage: Stage) -> Iterator[None]:
+    """Add the wall and CPU time of the enclosed block to ``report.stages[stage]``."""
+    wall_start = time.perf_counter()
+    cpu_start = time.process_time()
     try:
         yield
     finally:
-        acc = report.stages[stage]
-        acc[0] += time.perf_counter() - w0
-        acc[1] += time.process_time() - c0
+        timing = report.stages[stage.value]
+        timing.wall_s += time.perf_counter() - wall_start
+        timing.cpu_s += time.process_time() - cpu_start
 
 
-def floor_time(ts: datetime, seconds: float) -> datetime:
-    step = max(60.0, min(seconds, 3600.0))
-    epoch = ts.timestamp()
-    return datetime.fromtimestamp(epoch - epoch % step, UTC)
+def floor_to_step(moment: datetime, seconds: float) -> datetime:
+    """Round a moment down to a multiple of ``seconds`` (clamped between 1 min and 1 h), in UTC."""
+    step = max(MIN_FLOOR_SECONDS, min(seconds, MAX_FLOOR_SECONDS))
+    epoch_seconds = moment.timestamp()
+    return datetime.fromtimestamp(epoch_seconds - epoch_seconds % step, UTC)
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, store: Store, gates: Gates, connectors: dict[str, Connector],
-                 clock: Callable[[], datetime] = utc_now) -> None:
-        self.s = settings
+    """Runs jobs: one (source, dataset) over one window, from download to outbox."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        gates: Gates,
+        connectors: dict[str, Connector],
+        clock: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self.settings = settings
         self.store = store
         self.gates = gates
         self.connectors = connectors
         self.clock = clock
 
-    # -- windows ----------------------------------------------------------------------------
-    def live_window(self, ds: Dataset, now: datetime | None = None) -> Window:
+    # --- windows ---
+    def live_window(self, dataset: Dataset, now: datetime | None = None) -> Window:
+        """Return the live window ``[now - back, now + ahead)``, its start floored to the resolution."""
         now = now or self.clock()
-        return Window(floor_time(now - timedelta(seconds=ds.window_back), ds.resolution),
-                      now + timedelta(seconds=ds.window_ahead), Mode.LIVE)
+        start = floor_to_step(now - timedelta(seconds=dataset.window_back), dataset.resolution)
+        end = now + timedelta(seconds=dataset.window_ahead)
+        return Window(start, end, CaptureMode.LIVE)
 
-    def day_window(self, first: date, days: int) -> Window:
-        tz = self.s.timezone
-        start = datetime.combine(first, dtime(0), tz).astimezone(UTC)
-        end = datetime.combine(first + timedelta(days=days), dtime(0), tz).astimezone(UTC)
-        return Window(start, end, Mode.BACKFILL)
+    def day_window(self, first_day: date, day_count: int) -> Window:
+        """Return a backfill window covering whole local days, starting at local midnight."""
+        local_timezone = self.settings.timezone
+        start = datetime.combine(first_day, wall_time(0), local_timezone).astimezone(UTC)
+        end = datetime.combine(first_day + timedelta(days=day_count), wall_time(0), local_timezone).astimezone(UTC)
+        return Window(start, end, CaptureMode.BACKFILL)
 
-    # -- available_at estimate for backfill (conservative: never earlier than the real one) --
-    def estimate_available(self, ds: Dataset, obs: Observation) -> datetime:
-        pub = ds.publication
-        if "at" in pub:
-            hh, mm = (int(x) for x in str(pub["at"]).split(":"))
-            offset = timedelta(days=int(pub.get("day_offset", 0)))
-            local_day = obs.event_time.astimezone(self.s.timezone).date() + offset
-            return datetime.combine(local_day, dtime(hh, mm), self.s.timezone).astimezone(UTC)
-        lag = duration(pub["lag"]) if "lag" in pub else ds.resolution
-        return obs.event_time + timedelta(seconds=lag)
+    # --- available_at ---
+    def estimate_available_at(self, dataset: Dataset, observation: Observation) -> datetime:
+        """Estimate when a backfilled observation was first published.
 
-    # -- the job ----------------------------------------------------------------------------
-    def run(self, source: str, dataset: str, window: Window | None = None) -> JobReport:
-        conn = self.connectors[source]
-        ds = conn.datasets[dataset]
-        window = window or self.live_window(ds)
-        report = JobReport(source, dataset, window.mode.value)
+        The estimate is conservative (never earlier than the real publication), so point-in-time
+        features never see a value before it existed. ``publication`` is either ``{at: "HH:MM",
+        day_offset: N}`` (published at a local time, N days after the period's day) or ``{lag: "1h"}``;
+        without it, one resolution step after the period start is assumed.
+        """
+        publication = dataset.publication
+        if "at" in publication:
+            hour, minute = (int(part) for part in str(publication["at"]).split(":"))
+            day_offset = timedelta(days=int(publication.get("day_offset", 0)))
+            local_day = observation.event_time.astimezone(self.settings.timezone).date() + day_offset
+            published = datetime.combine(local_day, wall_time(hour, minute), self.settings.timezone)
+            return published.astimezone(UTC)
+        lag = parse_duration(publication["lag"]) if "lag" in publication else dataset.resolution
+        return observation.event_time + timedelta(seconds=lag)
+
+    # --- the job ---
+    def run(self, source: str, dataset_name: str, window: Window | None = None) -> JobReport:
+        """Run one job and return its report; errors are caught so one source never stops the others."""
+        connector = self.connectors[source]
+        dataset = connector.datasets[dataset_name]
+        window = window or self.live_window(dataset)
+        report = JobReport(source, dataset_name, window.mode.value)
         started = time.perf_counter()
         try:
-            self._run(conn, ds, window, report)
+            self._execute(connector, dataset, window, report)
         except ContractError as exc:
-            report.status, report.error = "contract_error", str(exc)[:300]
-            self._enqueue_dlq(source, dataset, "DG-E01", str(exc)[:300], [], 0)
+            report.fail(JobStatus.CONTRACT_ERROR, str(exc))
+            self._enqueue_dlq(source, dataset_name, STRUCTURE_RULE, report.error, samples=[], count=0)
         except NotImplementedError as exc:
-            report.status, report.error = "error", str(exc)[:300]
-        except Exception as exc:   # one failing source never stops the others
-            report.status = "fetch_error" if isinstance(exc, FetchError) else "error"
-            report.error = f"{type(exc).__name__}: {exc}"[:300]
+            report.fail(JobStatus.ERROR, str(exc))
+        except FetchError as exc:
+            report.fail(JobStatus.FETCH_ERROR, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # any other bug or surprise in one source must not stop the service
+            report.fail(JobStatus.ERROR, f"{type(exc).__name__}: {exc}")
         elapsed = time.perf_counter() - started
-        metrics.JOB_RUNS.labels(source, dataset, report.status).inc()
-        metrics.JOB_SECONDS.labels(source, dataset).observe(elapsed)
-        if report.succeeded:
-            metrics.LAST_SUCCESS.labels(source, dataset).set(time.time())
-        level = logging.INFO if report.succeeded else logging.WARNING
-        log.log(level, "job finished", extra={"source": source, "dataset": dataset, "mode": report.mode,
-                                               "status": report.status, "error": report.error,
-                                               "parsed": report.parsed, "sent": report.sent,
-                                               "rejected": report.rejected, "seconds": round(elapsed, 3)})
+        _record_job_metrics(report, elapsed)
+        _log_report(report, elapsed)
         return report
 
-    def _run(self, conn: Connector, ds: Dataset, window: Window, report: JobReport) -> None:
-        source = conn.name
+    # --- job steps ---
+    def _execute(self, connector: Connector, dataset: Dataset, window: Window, report: JobReport) -> None:
+        """Run every step of a job, filling ``report`` as it goes."""
+        source = connector.name
         fetched_at = self.clock()
-        reqs = conn.requests(ds, window)
-        report.requests = len(reqs)
+        requests = connector.requests(dataset, window)
+        report.requests = len(requests)
+        parsed = self._download_and_parse(connector, dataset, requests, report)
+        if requests and report.not_available == len(requests):
+            report.status = JobStatus.NOT_AVAILABLE
+            return
+
+        with measure_stage(report, Stage.DETECT):
+            fresh = self._select_fresh(source, window, parsed, report)
+            available_at_source = self._assign_available_at(dataset, window, fresh, fetched_at)
+
+        with measure_stage(report, Stage.GATES):
+            gate_result = self._apply_gates(dataset, fresh, fetched_at)
+        report.sent = len(gate_result.accepted)
+        report.rejected = len(gate_result.rejected)
+
+        lineage = self._build_lineage(
+            connector=connector,
+            window=window,
+            requests=requests,
+            parsed=parsed,
+            available_at_source=available_at_source,
+            gate_result=gate_result,
+            report=report,
+            fetched_at=fetched_at,
+        )
+        with measure_stage(report, Stage.SERIALIZE):
+            report.messages = self._enqueue_batches(source, dataset, window, gate_result.accepted, lineage, fetched_at)
+            self._enqueue_rejections(source, dataset.name, gate_result.rejected)
+            if window.is_live:
+                self.store.remember_sent(source, fresh)
+            if dataset.options.get("role") == CAPACITY_ROLE:
+                self._update_capacities(dataset, gate_result.accepted)
+        _count_observations(report)
+
+    def _download_and_parse(
+        self,
+        connector: Connector,
+        dataset: Dataset,
+        requests: list[Request],
+        report: JobReport,
+    ) -> ParseResult:
+        """Download and parse every request; unpublished resources are counted, not treated as errors."""
         parsed = ParseResult()
-        for req in reqs:
+        for request in requests:
             try:
-                with timed(report, "download"):
-                    payload = conn.download(req)
+                with measure_stage(report, Stage.DOWNLOAD):
+                    payload = connector.download(request)
             except NotAvailable:
                 report.not_available += 1
                 continue
             report.bytes += len(payload)
-            with timed(report, "parse"):
-                parsed.extend(conn.parse(ds, req, payload))
-        if reqs and report.not_available == len(reqs):
-            report.status = "not_available"
-            return
+            with measure_stage(report, Stage.PARSE):
+                parsed.extend(connector.parse(dataset, request, payload))
+        return parsed
 
-        with timed(report, "detect"):
-            inside = [o for o in parsed.observations if window.start <= o.event_time < window.end]
-            parsed.step("outside_window", len(parsed.observations) - len(inside))
-            report.parsed = len(inside)
-            if window.mode is Mode.LIVE:
-                fresh = self.store.changed(source, inside)
-                report.unchanged = len(inside) - len(fresh)
-                provenance = "first_seen"
+    def _select_fresh(self, source: str, window: Window, parsed: ParseResult, report: JobReport) -> list[Observation]:
+        """Keep the observations inside the window and, in live mode, only those that changed."""
+        # plain comparisons (no method call per observation): this runs on every poll, measured by bench.py
+        start = window.start
+        end = window.end
+        inside = [observation for observation in parsed.observations if start <= observation.event_time < end]
+        parsed.count_step("outside_window", len(parsed.observations) - len(inside))
+        report.parsed = len(inside)
+        if not window.is_live:
+            return inside
+        fresh = self.store.filter_changed(source, inside)
+        report.unchanged = len(inside) - len(fresh)
+        return fresh
+
+    def _assign_available_at(
+        self,
+        dataset: Dataset,
+        window: Window,
+        observations: list[Observation],
+        fetched_at: datetime,
+    ) -> AvailableAtSource:
+        """Fill ``available_at`` where the source did not state it, and return its provenance."""
+        provenance = AvailableAtSource.FIRST_SEEN if window.is_live else AvailableAtSource.ESTIMATED
+        for observation in observations:
+            if observation.available_at is not None:
+                provenance = AvailableAtSource.SOURCE
+            elif window.is_live:
+                observation.available_at = fetched_at
             else:
-                fresh = inside
-                provenance = "estimated"
-            for o in fresh:
-                if o.available_at is not None:
-                    provenance = "source"
-                elif window.mode is Mode.LIVE:
-                    o.available_at = fetched_at
-                else:
-                    o.available_at = self.estimate_available(ds, o)
+                observation.available_at = self.estimate_available_at(dataset, observation)
+        return provenance
 
-        with timed(report, "gates"):
-            ctx = Context(now=fetched_at, tz=self.s.timezone, nature=ds.nature, resolution=ds.resolution,
-                          capacities=self.store.capacities())
-            result = self.gates.evaluate(fresh, ctx)
-        report.sent, report.rejected = len(result.accepted), len(result.rejected)
-        for rule, n in result.warned.items():
-            metrics.GATE_VIOLATIONS.labels(rule, "warn").inc(n)
-        for rule, n in result.blocked.items():
-            metrics.GATE_VIOLATIONS.labels(rule, "block").inc(n)
+    def _apply_gates(self, dataset: Dataset, observations: list[Observation], fetched_at: datetime) -> GateResult:
+        """Evaluate the edge gates and count their violations in the metrics."""
+        context = Context(
+            now=fetched_at,
+            timezone=self.settings.timezone,
+            nature=dataset.nature,
+            resolution=dataset.resolution,
+            capacities=self.store.load_capacities(),
+        )
+        gate_result = self.gates.evaluate(observations, context)
+        for rule, count in gate_result.warned.items():
+            metrics.GATE_VIOLATIONS.labels(rule, "warn").inc(count)
+        for rule, count in gate_result.blocked.items():
+            metrics.GATE_VIOLATIONS.labels(rule, "block").inc(count)
+        return gate_result
 
-        lineage = {
-            "connector": f"{source}@{conn.version}", "ingestor_version": __version__,
-            "fetched_at": iso(fetched_at), "window": [iso(window.start), iso(window.end)],
-            "requests": [r.meta for r in reqs], "not_available": report.not_available,
-            "steps": parsed.steps, "available_at": provenance,
-            "gates": result.summary(self.gates.profile, self.gates.version),
-            "counts": {"parsed": report.parsed, "unchanged": report.unchanged,
-                       "sent": report.sent, "rejected": report.rejected},
+    def _build_lineage(
+        self,
+        connector: Connector,
+        window: Window,
+        requests: list[Request],
+        parsed: ParseResult,
+        available_at_source: AvailableAtSource,
+        gate_result: GateResult,
+        report: JobReport,
+        fetched_at: datetime,
+    ) -> dict[str, Any]:
+        """Return the lineage shared by every batch of the job: what was asked and what was done."""
+        return {
+            "connector": f"{connector.name}@{connector.version}",
+            "ingestor_version": __version__,
+            "fetched_at": to_iso(fetched_at),
+            "window": [to_iso(window.start), to_iso(window.end)],
+            "requests": [request.meta for request in requests],
+            "not_available": report.not_available,
+            "steps": parsed.steps,
+            "available_at": available_at_source.value,
+            "gates": gate_result.summary(self.gates.profile, self.gates.version),
+            "counts": {
+                "parsed": report.parsed,
+                "unchanged": report.unchanged,
+                "sent": report.sent,
+                "rejected": report.rejected,
+            },
         }
-        with timed(report, "serialize"):
-            topic, key = f"{self.s.sink.topic_prefix}.{source}", f"{source}.{ds.name}"
-            messages = []
-            for i in range(0, len(result.accepted), CHUNK_ROWS):
-                chunk = result.accepted[i:i + CHUNK_ROWS]
-                payload = build_batch(source=source, dataset=ds.name, nature=ds.nature, mode=window.mode,
-                                      ingestor=self.s.node_id, observations=chunk,
-                                      lineage={**lineage, "chunk": i // CHUNK_ROWS}, created_at=fetched_at)
-                messages.append((topic, key, payload))
-            self.store.enqueue(messages)
-            report.messages = len(messages)
-            if result.rejected:
-                self.store.quarantine(source, ds.name, result.rejected)
-                by_rule: dict[str, list[Observation]] = defaultdict(list)
-                for o, rule in result.rejected:
-                    by_rule[rule].append(o)
-                for rule, items in by_rule.items():
-                    self._enqueue_dlq(source, ds.name, rule, "edge gate failed", items, len(items))
-            if window.mode is Mode.LIVE:
-                self.store.remember(source, fresh)
-            if ds.raw.get("role") == "capacity":
-                prefix = str(ds.raw.get("variable_prefix", ""))
-                latest: dict[str, tuple[datetime, float]] = {}
-                for o in result.accepted:
-                    if o.variable not in latest or o.event_time > latest[o.variable][0]:
-                        latest[o.variable] = (o.event_time, o.value)
-                self.store.set_capacity({v.removeprefix(prefix): val for v, (_, val) in latest.items()})
 
-        metrics.OBSERVATIONS.labels(source, ds.name, "parsed").inc(report.parsed)
-        metrics.OBSERVATIONS.labels(source, ds.name, "unchanged").inc(report.unchanged)
-        metrics.OBSERVATIONS.labels(source, ds.name, "sent").inc(report.sent)
-        metrics.OBSERVATIONS.labels(source, ds.name, "rejected").inc(report.rejected)
+    def _enqueue_batches(
+        self,
+        source: str,
+        dataset: Dataset,
+        window: Window,
+        accepted: list[Observation],
+        lineage: dict[str, Any],
+        fetched_at: datetime,
+    ) -> int:
+        """Serialize the accepted observations in chunks of ``CHUNK_ROWS`` and store them in the outbox."""
+        topic = f"{self.settings.sink.topic_prefix}.{source}"
+        key = f"{source}.{dataset.name}"
+        messages = []
+        for chunk_index, first_row in enumerate(range(0, len(accepted), CHUNK_ROWS)):
+            payload = build_batch(
+                source=source,
+                dataset=dataset.name,
+                nature=dataset.nature,
+                mode=window.mode,
+                ingestor=self.settings.node_id,
+                observations=accepted[first_row:first_row + CHUNK_ROWS],
+                lineage={**lineage, "chunk": chunk_index},
+                created_at=fetched_at,
+            )
+            messages.append(OutgoingMessage(topic, key, payload))
+        self.store.enqueue(messages)
+        return len(messages)
 
-    def _enqueue_dlq(self, source: str, dataset: str, rule: str, reason: str,
-                     samples: list[Observation], count: int) -> None:
-        payload = build_dlq(source=source, dataset=dataset, ingestor=self.s.node_id, rule=rule, reason=reason,
-                            samples=samples, count=count, created_at=self.clock())
-        self.store.enqueue([(self.s.sink.dlq_topic, f"{source}.{dataset}", payload)])
+    def _enqueue_rejections(self, source: str, dataset_name: str, rejections: list[Rejection]) -> None:
+        """Quarantine rejected observations and send one DLQ message per blocking rule."""
+        if not rejections:
+            return
+        self.store.quarantine(source, dataset_name, rejections)
+        observations_by_rule: dict[str, list[Observation]] = defaultdict(list)
+        for rejection in rejections:
+            observations_by_rule[rejection.rule].append(rejection.observation)
+        for rule, observations in observations_by_rule.items():
+            self._enqueue_dlq(source, dataset_name, rule, "edge gate failed", observations, len(observations))
+
+    def _update_capacities(self, dataset: Dataset, accepted: list[Observation]) -> None:
+        """Store the latest installed capacity per technology from a ``role: capacity`` dataset (DG-E11)."""
+        prefix = str(dataset.options.get("variable_prefix", ""))
+        latest: dict[str, Observation] = {}
+        for observation in accepted:
+            current = latest.get(observation.variable)
+            if current is None or observation.event_time > current.event_time:
+                latest[observation.variable] = observation
+        megawatts_by_technology = {
+            variable.removeprefix(prefix): observation.value for variable, observation in latest.items()
+        }
+        self.store.set_capacities(megawatts_by_technology)
+
+    def _enqueue_dlq(
+        self,
+        source: str,
+        dataset_name: str,
+        rule: str,
+        reason: str,
+        samples: list[Observation],
+        count: int,
+    ) -> None:
+        """Store a DLQ message explaining why observations (or a whole payload) were rejected."""
+        payload = build_dlq(
+            source=source,
+            dataset=dataset_name,
+            ingestor=self.settings.node_id,
+            rule=rule,
+            reason=reason,
+            samples=samples,
+            count=count,
+            created_at=self.clock(),
+        )
+        self.store.enqueue([OutgoingMessage(self.settings.sink.dlq_topic, f"{source}.{dataset_name}", payload)])
+
+
+# --------------------------------------------------------------------------- private helpers
+def _count_observations(report: JobReport) -> None:
+    """Add the job's observation counts per outcome to the metrics."""
+    outcomes = {
+        "parsed": report.parsed,
+        "unchanged": report.unchanged,
+        "sent": report.sent,
+        "rejected": report.rejected,
+    }
+    for outcome, count in outcomes.items():
+        metrics.OBSERVATIONS.labels(report.source, report.dataset, outcome).inc(count)
+
+
+def _record_job_metrics(report: JobReport, elapsed: float) -> None:
+    """Record the run, its duration and, on success, the time of the last success."""
+    metrics.JOB_RUNS.labels(report.source, report.dataset, report.status.value).inc()
+    metrics.JOB_SECONDS.labels(report.source, report.dataset).observe(elapsed)
+    if report.succeeded:
+        metrics.LAST_SUCCESS.labels(report.source, report.dataset).set(time.time())
+
+
+def _log_report(report: JobReport, elapsed: float) -> None:
+    """Log one line per job: INFO on success, WARNING on failure."""
+    level = logging.INFO if report.succeeded else logging.WARNING
+    log.log(level, "job finished", extra={
+        "source": report.source,
+        "dataset": report.dataset,
+        "mode": report.mode,
+        "status": report.status.value,
+        "error": report.error,
+        "parsed": report.parsed,
+        "sent": report.sent,
+        "rejected": report.rejected,
+        "seconds": round(elapsed, 3),
+    })

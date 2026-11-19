@@ -4,75 +4,82 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-import pytest
-
-from mibel_ingestor.model import Request
-from mibel_ingestor.pipeline import JobReport
-from mibel_ingestor.service import Service, source_status
+from mibel_ingestor.model import OutgoingMessage, Request
+from mibel_ingestor.pipeline import JobReport, JobStatus
+from mibel_ingestor.service import Service, describe_sources
 from mibel_ingestor.settings import Settings
+from mibel_ingestor.sinks import NullSink, Sink
 from mibel_ingestor.store import Store
 
 import synthetic
-from conftest import TZ
+from conftest import MADRID
 
 
 class BrokenSink:
+    """A sink whose broker is always down."""
+
     def __init__(self) -> None:
         self.calls = 0
 
-    def send(self, messages: list[tuple[str, str, bytes]]) -> list[bool]:
+    def send(self, messages: list[OutgoingMessage]) -> list[bool]:
+        """Fail every delivery."""
         self.calls += 1
         raise ConnectionError("broker down")
 
     def close(self) -> None:
-        pass
+        """Nothing to release."""
 
 
-def omie_service(settings: Settings, sink: object | None = None) -> Service:
-    from mibel_ingestor.sinks import NullSink
-    svc = Service(settings, sink=sink or NullSink(), store=Store(":memory:"), only={"omie"})  # type: ignore[arg-type]
-    conn = svc.connectors["omie"]
+def serve_synthetic_omie(request: Request) -> bytes:
+    """Return a synthetic OMIE file for the requested day instead of downloading it."""
+    day = date.fromisoformat(str(request.meta["day"]))
+    if request.params["parents"] == "precios_pibcic":
+        return synthetic.omie_continuous(day)
+    return synthetic.omie_marginal(day)
 
-    def fake_download(req: Request) -> bytes:       # serve synthetic files instead of the network
-        day = date.fromisoformat(str(req.meta["day"]))
-        if req.params["parents"] == "precios_pibcic":
-            return synthetic.omie_continuous(day)
-        return synthetic.omie_marginal(day)
-    conn.download = fake_download                   # type: ignore[method-assign]
-    return svc
+
+def omie_service(settings: Settings, sink: Sink | None = None) -> Service:
+    """A service running only OMIE, with synthetic downloads and an in-memory store."""
+    service = Service(settings, sink=sink or NullSink(), store=Store(":memory:"), only={"omie"})
+    service.connectors["omie"].download = serve_synthetic_omie  # type: ignore[method-assign]
+    return service
 
 
 def test_failed_job_retries_with_backoff_before_next_slot(settings: Settings) -> None:
-    svc = omie_service(settings)
-    job = svc.scheduler.jobs[0]
-    failed = JobReport("omie", job.dataset, "live", status="fetch_error")
-    before = datetime.now(TZ)
-    svc.scheduler._finished(job, failed)
-    first = job.next_run
-    svc.scheduler._finished(job, failed)
+    service = omie_service(settings)
+    job = service.scheduler.jobs[0]
+    failed = JobReport("omie", job.dataset, "live", status=JobStatus.FETCH_ERROR)
+    before = datetime.now(MADRID)
+    service.scheduler._schedule_next_run(job, failed)
+    first_retry = job.next_run
+    service.scheduler._schedule_next_run(job, failed)
     assert job.failures == 2
-    assert first - before <= timedelta(seconds=settings.retry_first + 5)
+    assert first_retry - before <= timedelta(seconds=settings.retry_first + 5)
     assert job.next_run - before <= timedelta(seconds=2 * settings.retry_first + 5)
-    svc.scheduler._finished(job, JobReport("omie", job.dataset, "live"))
+    service.scheduler._schedule_next_run(job, JobReport("omie", job.dataset, "live"))
     assert job.failures == 0
 
 
 def test_messages_survive_a_broken_sink(settings: Settings) -> None:
     sink = BrokenSink()
-    svc = omie_service(settings, sink)
-    reports = svc.run_once("omie", "day_ahead")
-    assert reports[0].status == "ok" and sink.calls == 1
-    assert svc.store.pending() == reports[0].messages > 0          # kept for the next delivery
+    service = omie_service(settings, sink)
+    reports = service.run_once("omie", "day_ahead")
+    assert reports[0].status is JobStatus.OK
+    assert sink.calls == 1
+    assert service.store.count_pending() == reports[0].messages > 0  # kept for the next delivery
 
 
 def test_backfill_is_resumable(settings: Settings) -> None:
-    svc = omie_service(settings)
-    first = svc.backfill("omie", "day_ahead", date(2026, 1, 1), date(2026, 1, 3))
-    assert len(first) == 3 and all(r.sent == 192 and r.mode == "backfill" for r in first)
-    assert svc.backfill("omie", "day_ahead", date(2026, 1, 1), date(2026, 1, 4)).__len__() == 1
+    service = omie_service(settings)
+    first_run = service.backfill("omie", "day_ahead", date(2026, 1, 1), date(2026, 1, 3))
+    assert len(first_run) == 3
+    assert all(report.sent == 192 and report.mode == "backfill" for report in first_run)
+    second_run = service.backfill("omie", "day_ahead", date(2026, 1, 1), date(2026, 1, 4))
+    assert len(second_run) == 1  # only the new day
 
 
-def test_source_status_explains_disabled_sources(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-    status = {s.name: s for s in source_status(settings)}
-    assert not status["entsoe"].enabled and "ENTSOE_TOKEN" in status["entsoe"].reason
-    assert status["omie"].enabled
+def test_describe_sources_explains_disabled_sources(settings: Settings) -> None:
+    statuses = {status.name: status for status in describe_sources(settings)}
+    assert not statuses["entsoe"].enabled
+    assert "ENTSOE_TOKEN" in statuses["entsoe"].reason
+    assert statuses["omie"].enabled

@@ -1,3 +1,5 @@
+"""Configuration: durations, run modes, overrides, environment and source defaults."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -5,21 +7,23 @@ from pathlib import Path
 import pytest
 
 from mibel_ingestor import settings
-from mibel_ingestor.settings import ConfigError, duration
+from mibel_ingestor.settings import ConfigError, QualityProfile, SinkType, parse_duration
 
 from conftest import CONFIG_DIR
 
 
-@pytest.mark.parametrize(("text", "seconds"), [("5m", 300), ("1h30m", 5400), ("2d", 172800), (30, 30),
-                                               ("0s", 0), ("-1d", -86400), ("250ms", 0.25)])
-def test_duration(text: object, seconds: float) -> None:
-    assert duration(text) == seconds
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("5m", 300), ("1h30m", 5400), ("2d", 172800), (30, 30), ("0s", 0), ("-1d", -86400), ("250ms", 0.25)],
+)
+def test_parse_duration(text: object, seconds: float) -> None:
+    assert parse_duration(text) == seconds
 
 
-@pytest.mark.parametrize("bad", ["5", "five minutes", "1x", ""])
-def test_duration_rejects_garbage(bad: str) -> None:
+@pytest.mark.parametrize("bad_text", ["5", "five minutes", "1x", ""])
+def test_parse_duration_rejects_garbage(bad_text: str) -> None:
     with pytest.raises(ConfigError):
-        duration(bad)
+        parse_duration(bad_text)
 
 
 def test_pro_needs_node_id_and_kafka(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29,8 +33,10 @@ def test_pro_needs_node_id_and_kafka(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ConfigError, match="MIBEL_KAFKA_BOOTSTRAP"):
         settings.load(CONFIG_DIR, "pro")
     monkeypatch.setenv("MIBEL_KAFKA_BOOTSTRAP", "broker:9092")
-    s = settings.load(CONFIG_DIR, "pro")
-    assert s.quality_profile == "production" and s.sink.type == "kafka" and s.sink.bootstrap == "broker:9092"
+    pro_settings = settings.load(CONFIG_DIR, "pro")
+    assert pro_settings.quality_profile is QualityProfile.PRODUCTION
+    assert pro_settings.sink.type is SinkType.KAFKA
+    assert pro_settings.sink.bootstrap == "broker:9092"
 
 
 def test_pro_allows_no_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,8 +46,10 @@ def test_pro_allows_no_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_test_mode_overrides_output_only() -> None:
-    s = settings.load(CONFIG_DIR, "test", {"sink.type": "jsonl", "sources.omie.enabled": False})
-    assert s.sink.type == "jsonl" and s.quality_profile == "production" and not s.sources["omie"].enabled
+    test_settings = settings.load(CONFIG_DIR, "test", {"sink.type": "jsonl", "sources.omie.enabled": False})
+    assert test_settings.sink.type is SinkType.JSONL
+    assert test_settings.quality_profile is QualityProfile.PRODUCTION
+    assert not test_settings.sources["omie"].enabled
     with pytest.raises(ConfigError, match=r"http\.retries"):
         settings.load(CONFIG_DIR, "test", {"sink.type": "jsonl", "http.retries": 9})
     with pytest.raises(ConfigError):
@@ -49,15 +57,22 @@ def test_test_mode_overrides_output_only() -> None:
 
 
 def test_dev_defaults_and_free_overrides() -> None:
-    s = settings.load(CONFIG_DIR, "dev")
-    assert s.sink.type == "stdout" and s.quality_profile == "development"
-    s = settings.load(CONFIG_DIR, "dev", {"http.retries": 0, "buffer.pending_ttl": "1h"})
-    assert s.http.retries == 0 and s.buffer.pending_ttl == 3600
+    dev_settings = settings.load(CONFIG_DIR, "dev")
+    assert dev_settings.sink.type is SinkType.STDOUT
+    assert dev_settings.quality_profile is QualityProfile.DEVELOPMENT
+    dev_settings = settings.load(CONFIG_DIR, "dev", {"http.retries": 0, "buffer.pending_ttl": "1h"})
+    assert dev_settings.http.retries == 0
+    assert dev_settings.buffer.pending_ttl == 3600
+
+
+def test_unknown_mode_is_refused() -> None:
+    with pytest.raises(ConfigError, match="unknown mode"):
+        settings.load(CONFIG_DIR, "staging")
 
 
 def test_auto_enabled_follows_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not settings.load(CONFIG_DIR, "dev").sources["entsoe"].enabled
-    monkeypatch.setenv("ENTSOE_TOKEN", "<your-token-here>")            # placeholder counts as missing
+    monkeypatch.setenv("ENTSOE_TOKEN", "<your-token-here>")  # the placeholder counts as missing
     assert not settings.load(CONFIG_DIR, "dev").sources["entsoe"].enabled
     monkeypatch.setenv("ENTSOE_TOKEN", "real")
     assert settings.load(CONFIG_DIR, "dev").sources["entsoe"].enabled
@@ -68,9 +83,9 @@ def test_disabled_dataset_is_dropped() -> None:
 
 
 def test_dataset_inherits_source_defaults() -> None:
-    ds = settings.load(CONFIG_DIR, "dev").sources["omie"].datasets
-    assert ds["day_ahead"]["schedule"] == {"every": "1h", "offset": "7m"}
-    assert ds["continuous"]["window"] == {"back": "2d", "ahead": "0s"}
+    datasets = settings.load(CONFIG_DIR, "dev").sources["omie"].datasets
+    assert datasets["day_ahead"]["schedule"] == {"every": "1h", "offset": "7m"}
+    assert datasets["continuous"]["window"] == {"back": "2d", "ahead": "0s"}
 
 
 def test_local_override_file_follows_mode_rules(tmp_path: Path) -> None:
@@ -85,18 +100,23 @@ def test_local_override_file_follows_mode_rules(tmp_path: Path) -> None:
 def test_state_dir_from_systemd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("MIBEL_STATE_DIR")
     monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
-    s = settings.load(CONFIG_DIR, "dev")
-    assert s.buffer.path == tmp_path / "buffer.sqlite"
+    assert settings.load(CONFIG_DIR, "dev").buffer.path == tmp_path / "buffer.sqlite"
 
 
-def test_env_file_loader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    env = tmp_path / ".env"
-    env.write_text("# comment\nESIOS_TOKEN='abc'\nexport AEMET_API_KEY=xyz\n")
-    settings.load_env_file(env)
-    assert settings.secret("ESIOS_TOKEN") == "abc" and settings.secret("AEMET_API_KEY") == "xyz"
+def test_env_file_loader(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("# comment\nESIOS_TOKEN='abc'\nexport AEMET_API_KEY=xyz\n")
+    settings.load_env_file(env_file)
+    assert settings.read_secret("ESIOS_TOKEN") == "abc"
+    assert settings.read_secret("AEMET_API_KEY") == "xyz"
 
 
 def test_null_sink_from_set_argument() -> None:
     # `--set sink.type=null` is parsed as YAML, where `null` means None
-    s = settings.load(CONFIG_DIR, "test", settings.parse_set_args(["sink.type=null"]))
-    assert s.sink.type == "null"
+    test_settings = settings.load(CONFIG_DIR, "test", settings.parse_set_args(["sink.type=null"]))
+    assert test_settings.sink.type is SinkType.NULL
+
+
+def test_unknown_sink_type_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="unknown sink type"):
+        settings.load(CONFIG_DIR, "dev", {"sink.type": "carrier-pigeon"})

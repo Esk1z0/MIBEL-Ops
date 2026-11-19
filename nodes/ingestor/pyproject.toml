@@ -45,7 +45,9 @@ known-local-folder = ["conftest", "synthetic"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-files = ["src"]
+files = ["src", "tests", "benchmarks"]
+mypy_path = ["src", "tests", "tests/fixtures"]
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = ["openpyxl.*", "confluent_kafka.*"]
