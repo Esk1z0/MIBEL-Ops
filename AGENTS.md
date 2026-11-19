@@ -65,3 +65,45 @@ Every reply in which something was created, modified or deleted must include:
 ## 7. Consistency with the documentation
 - If the code departs from what is documented in `docs/`, update the document in the same change or flag it explicitly.
 - Any new or modified decision is recorded in [docs/06_technical_decisions.md](docs/06_technical_decisions.md) (ADR-00).
+
+## 8. Code style (readability first)
+Code is reviewed **function by function** by the maintainer. Write it so that each function can be understood without reading its body or the rest of the file. These rules apply to all new or modified Python code; when touching an existing function, bring it up to this style.
+
+### 8.1 Docstrings
+- Every **public** function, method and class has a docstring (Google style).
+- First line: what it does, imperative mood, one line (`"""Estimate when a backfilled observation was first published."""`).
+- Add a short paragraph only for what is not obvious: the reason, the rules it applies, invariants, references (DG-E, ADR, NFR).
+- `Args:` / `Returns:` / `Raises:` only when they add information the type hints do not give.
+- Private helpers (`_name`) get at least a one-line docstring unless they are trivial and their name says everything.
+
+### 8.2 Names
+- Full, descriptive names: `settings`, `dataset`, `observation`/`obs`, `connector`, `wall_start`. No one- or two-letter names except `i`/`j` in short loops and `exc` in `except`.
+- No magic indices or positional tuples for structured data (`acc[0]`, `(w, c)`): use a small `@dataclass` or `NamedTuple` with named fields.
+- Functions are verbs (`build_lineage`, `apply_gates`), booleans read as questions (`is_live`, `has_capacity`).
+
+### 8.3 Types that document
+- A closed set of values is an `Enum` (`class JobStatus(str, Enum)`), not a free string with the options listed in a comment. Python 3.10 compatible: no `StrEnum`.
+- Prefer dataclasses with named fields over `dict[str, Any]` or tuples when the shape is known.
+- Full type hints on every signature (mypy `strict` already applies).
+
+### 8.4 Comments explain *why*
+- Do not comment *what* the code does; the names should say that.
+- Comment *why*: a decision, a limit, a non-obvious edge case, or a reference (`# DG-E11 needs the latest installed MW per technology`).
+- A non-obvious block inside a long function starts with a one-line comment stating its purpose.
+
+### 8.5 One line, one idea
+- One assignment per line (`report.status = ...` then `report.error = ...`, never `a, b = x, y` for unrelated values).
+- No comprehensions that unpack nested tuples or contain conditionals and calls at the same time; use a loop or a named helper.
+- Calls with many arguments: one argument per line. Do not build large payloads inline inside a loop; extract them.
+- Prefer early returns (guard clauses) over deep nesting.
+
+### 8.6 Module layout
+Every module follows the same order:
+1. Module docstring: purpose, flow (a small diagram if useful), references to docs/ADR.
+2. Imports.
+3. Constants.
+4. Types (enums, dataclasses).
+5. **Public API**: what other modules use.
+6. Private helpers (`_name`), at the end.
+
+Group related methods inside a class with uniform section separators: `# --- windows ---`.
