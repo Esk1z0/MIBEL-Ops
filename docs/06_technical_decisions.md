@@ -44,6 +44,7 @@
 | A-24 | The target stays the **real continuous VWAP**; since it is published on D+1, the nowcast uses the latest IDA as real-time reference (DG-P06) and the previous day's continuous price for checks | 2026-11-11 |
 | A-25 | Ingestor nodes keep **no raw payloads** and no long-term data: only curated observations plus their lineage, until they are delivered (at most 30 days / 1 GB). The manager is the only node that stores data | 2026-11-11 |
 | A-26 | Day-ahead stays the **official baseline** of SB-P01 and the PC criteria; the latest IDA is reported as an informational **stretch reference** (rMAE<sub>IDA</sub>), a target to beat | 2026-11-11 |
+| A-27 | **Code style guide** ([AGENTS.md](../AGENTS.md) §8: Google docstrings, full names, enums for closed sets, dataclasses or NamedTuples instead of positional tuples, fixed module layout). The ingestor was rewritten to it with no behaviour change and the same CPU cost (benchmark before/after) | 2026-11-19 |
 
 ---
 
@@ -385,11 +386,12 @@ One Kafka message per (source, dataset, fetch) batch on `mibel.raw.<source>`, ke
 ```
 `id = sha1(source|variable|node|event_time|available_at)[:16]`. Rejections go to `mibel.dlq` as `mibel.dlq/1` (rule, reason, count, up to 3 samples).
 
-### 5.4 Measurements (development desktop PC, 2026-11-11; Raspberry Pi pending)
+### 5.4 Measurements (development desktop PC 2026-11-11 · Raspberry Pi 3B+ 2026-11-19)
 | Measure | Value | Notes |
 |---|---|---|
 | Real pass over the 18 enabled datasets (`once`, test mode) | 18/18 ok · 0 rejected · ~36 s wall · **1.4 s CPU** | 1.0 s of it is parsing MIBGAS's 3.3 MB Excel → its cadence lowered to 12 h |
 | Same pass with ENTSO-E enabled, 21 datasets (2026-11-18) | 21/21 ok · 0 rejected · 3,195 observations · ~60 s wall · **1.6 s CPU** · 69 MB RSS | ENTSO-E answers slowly (~8 s per request), almost no CPU |
+| **Raspberry Pi 3B+** (Ubuntu Server 64-bit, Python 3.14), same pass | 21/21 ok · 0 rejected · 48 s wall · **8.6 s CPU** · **59 MB** RSS · idle 0.015 % CPU | CPU per operation 18–24× the desktop PC; daily budget ≈ 120 s CPU (0.14 % of one core). Details: [benchmarks/README.md](../nodes/ingestor/benchmarks/README.md) |
 | Peak memory | **68–71 MB** RSS | Limit 200 MB (NFR-02) |
 | Idle service (21 jobs loaded) | **0.008 % CPU** | |
 | Offline benchmark (synthetic, all 21 datasets) | 93 ms CPU · ~70,000 observations per CPU second | Repeated poll with no changes: ~4× cheaper |

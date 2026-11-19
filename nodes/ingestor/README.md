@@ -40,7 +40,7 @@ mibel-ingestor once --source omie                         # dev mode: one pass, 
 mibel-ingestor once --mode test --set sink.type=jsonl --env-file ../../.env    # production rules, file output
 mibel-ingestor run  --mode test --set sink.type=jsonl --env-file ../../.env    # the service loop
 mibel-ingestor backfill --source omie --dataset day_ahead --start 2025-10-01 --end 2025-10-31
-pytest && ruff check . && mypy
+pytest && ruff check . && mypy                            # mypy (strict) covers src, tests and benchmarks
 ```
 
 ## Adding a source
@@ -49,7 +49,11 @@ pytest && ruff check . && mypy
 3. Add a contract test with a synthetic payload in `tests/` and, if useful, a generator in `tests/fixtures/synthetic.py` (the benchmark reuses it).
 4. If it brings new variables, check that a DG-E range rule covers them in `config/quality.yaml`.
 
+Shared helpers of the base class: `read_secret()`, `require_options()`, `parse_number()` and `make_observation()`. Code style (docstrings, names, enums, module layout): [AGENTS.md](../../AGENTS.md) §8.
+
 ## Installing on a Raspberry Pi
+Manual test without installing anything system-wide: clone the repository, create `.venv` in `nodes/ingestor/`, install `requirements.lock.txt` plus `pip install --no-deps -e ".[excel]"`, and **activate the venv in every new shell** (`source .venv/bin/activate`); otherwise `mibel-ingestor` and `python` are not found (Ubuntu only ships `python3`).
+
 `sudo deploy/install.sh [--with-kafka]`: it creates the `mibel` user, a venv in `/opt/mibel-ingestor` from `requirements.lock.txt` and the `systemd` unit. It changes the operating system, so it needs the maintainer's approval ([AGENTS.md](../../AGENTS.md) §4). Then fill `/etc/mibel-ingestor/env` and `systemctl enable --now mibel-ingestor`.
 
-Status: **v0.1** · tested on the development desktop PC (x86_64, Python 3.12) on 2026-11-11 · Raspberry Pi and Kafka pending.
+Status: **v0.1** · tested on the development desktop PC (x86_64, Python 3.12) on 2026-11-11 and on a Raspberry Pi 3B+ (aarch64, Ubuntu Server, Python 3.14) on 2026-11-19 · Kafka and systemd install pending.
