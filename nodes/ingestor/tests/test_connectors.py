@@ -281,6 +281,32 @@ def test_entsoe_a03_forward_fill() -> None:
     assert result.observations[3].event_time == first_hour + timedelta(hours=3)
 
 
+def test_entsoe_a03_fills_omitted_trailing_points_up_to_the_period_end() -> None:
+    # A03 omits trailing repeats too: a flow that stays at 250 has no points after position 3
+    connector = make_connector("entsoe")
+    first_hour = datetime(2026, 11, 10, 23, tzinfo=UTC)
+    payload = synthetic.entsoe(first_hour, [100, None, 250, None, None], curve="A03")
+    result = connector.parse(connector.datasets["flow_fr_es"], fake_request(), payload)
+    assert [observation.value for observation in result.observations] == [100, 100, 250, 250, 250]
+    assert result.observations[-1].event_time == first_hour + timedelta(hours=4)
+    assert result.steps == {"A03_forward_fill": 3}
+
+
+def test_entsoe_a01_missing_points_stay_missing() -> None:
+    connector = make_connector("entsoe")
+    payload = synthetic.entsoe(datetime(2026, 11, 10, 23, tzinfo=UTC), [100, None, None])
+    result = connector.parse(connector.datasets["flow_fr_es"], fake_request(), payload)
+    assert [observation.value for observation in result.observations] == [100]
+
+
+def test_entsoe_invalid_position_breaks_the_contract() -> None:
+    connector = make_connector("entsoe")
+    payload = synthetic.entsoe(datetime(2026, 11, 10, 23, tzinfo=UTC), [100])
+    broken = payload.replace(b"<position>1</position>", b"<position>first</position>")
+    with pytest.raises(ContractError, match="position"):
+        connector.parse(connector.datasets["flow_fr_es"], fake_request(), broken)
+
+
 def test_entsoe_acknowledgement_means_not_available() -> None:
     connector = make_connector("entsoe")
     with pytest.raises(NotAvailable):

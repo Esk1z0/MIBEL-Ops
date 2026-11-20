@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ElementTree
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from ..model import UTC, ContractError, NotAvailable, ParseResult, Request, Window, parse_iso
 from .base import Connector, Dataset, register
@@ -94,8 +94,14 @@ class Entsoe(Connector):
         namespaces: dict[str, str],
         result: ParseResult,
     ) -> None:
-        """Add the points of one period, forward-filling the gaps of A03 curves."""
+        """Add the points of one period, forward-filling the gaps of A03 curves up to the period end.
+
+        A03 omits every point that repeats the previous value, the trailing ones included: a flow that
+        stays at 0 until the end of the day has no points after its last change. So the number of
+        positions comes from ``timeInterval`` (start to end), not from the last point received.
+        """
         start_text = period.findtext("ns:timeInterval/ns:start", namespaces=namespaces)
+        end_text = period.findtext("ns:timeInterval/ns:end", namespaces=namespaces)
         resolution_text = period.findtext("ns:resolution", default="", namespaces=namespaces)
         resolution = _RESOLUTION.fullmatch(resolution_text)
         if start_text is None or resolution is None:
@@ -103,13 +109,14 @@ class Entsoe(Connector):
         period_start = parse_iso(start_text)
         step = timedelta(minutes=int(resolution.group(1)))
         values = self._point_values(period, namespaces)
+        position_count = _position_count(period_start, end_text, step, values)
         variable = str(dataset.options["variable"])
         node = str(dataset.options.get("node", DEFAULT_NODE))
         unit = str(dataset.options["unit"])
         last_value = None
-        for position in range(1, max(values, default=0) + 1):
+        for position in range(1, position_count + 1):
             value = values.get(position)
-            if value is None and curve == CURVE_HOLDS_UNTIL_NEXT:
+            if value is None and curve == CURVE_HOLDS_UNTIL_NEXT and last_value is not None:
                 value = last_value
                 result.count_step("A03_forward_fill")
             if value is None:
@@ -122,7 +129,7 @@ class Entsoe(Connector):
         """Return the quantity of every point of a period, keyed by its 1-based position."""
         values = {}
         for point in period.findall("ns:Point", namespaces):
-            position = int(point.findtext("ns:position", default="0", namespaces=namespaces))
+            position = _parse_position(point.findtext("ns:position", default="", namespaces=namespaces))
             quantity = point.findtext("ns:quantity", namespaces=namespaces)
             values[position] = self.parse_number(quantity, "ENTSO-E quantity")
         return values
@@ -143,6 +150,41 @@ def _parse_xml(payload: bytes) -> ElementTree.Element:
         return ElementTree.fromstring(payload)
     except ElementTree.ParseError:
         raise ContractError("ENTSO-E: response is not XML") from None
+
+
+def _position_count(
+    period_start: datetime,
+    end_text: str | None,
+    step: timedelta,
+    values: dict[int, float | None],
+) -> int:
+    """Return how many positions a period has: from its time interval, or its last point if no end is given.
+
+    Raises:
+        ContractError: the interval end is before its start.
+    """
+    last_point = max(values, default=0)
+    if end_text is None:
+        return last_point
+    duration = parse_iso(end_text) - period_start
+    if duration < timedelta(0):
+        raise ContractError("ENTSO-E: period ends before it starts")
+    return max(last_point, int(duration / step))
+
+
+def _parse_position(text: str) -> int:
+    """Return a 1-based point position.
+
+    Raises:
+        ContractError: the position is missing, not an integer or below 1.
+    """
+    try:
+        position = int(text)
+    except ValueError:
+        raise ContractError(f"ENTSO-E: invalid point position {text!r}") from None
+    if position < 1:
+        raise ContractError(f"ENTSO-E: invalid point position {text!r}")
+    return position
 
 
 def _namespace_of(root: ElementTree.Element) -> str:
