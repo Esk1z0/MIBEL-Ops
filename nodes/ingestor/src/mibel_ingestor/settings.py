@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -195,17 +196,21 @@ def read_secret(name: str) -> str | None:
 def load_env_file(path: Path) -> None:
     """Load ``KEY=VALUE`` lines into the environment (development only, no python-dotenv dependency).
 
-    Variables already present in the environment win. Values are never printed.
+    Variables already present in the environment win. Values are never printed. A missing file is an
+    error: ignoring it would silently turn off every ``enabled: auto`` source.
+
+    Raises:
+        ConfigError: the file does not exist.
     """
     if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+        raise ConfigError(f"env file not found: {path}")
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.removeprefix("export ").strip()
-        os.environ.setdefault(key, value.strip().strip("'\""))
+        os.environ.setdefault(key, _parse_env_value(value))
 
 
 def parse_set_args(items: list[str]) -> dict[str, Any]:
@@ -218,7 +223,10 @@ def parse_set_args(items: list[str]) -> dict[str, Any]:
         key, separator, value = item.partition("=")
         if not separator or not key.strip():
             raise ConfigError(f"--set expects key=value, got {item!r}")
-        overrides[key.strip()] = yaml.safe_load(value) if value else ""
+        try:
+            overrides[key.strip()] = yaml.safe_load(value) if value else ""
+        except yaml.YAMLError:
+            raise ConfigError(f"--set {key.strip()}: value is not valid YAML") from None
     return overrides
 
 
@@ -266,12 +274,12 @@ def load(
     mode_config = data["modes"][run_mode.value]
     return Settings(
         mode=run_mode,
-        quality_profile=QualityProfile(str(mode_config["quality_profile"])),
+        quality_profile=_parse_quality_profile(mode_config.get("quality_profile")),
         node_id=_resolve_node_id(run_mode),
-        timezone=ZoneInfo(str(data.get("timezone", "Europe/Madrid"))),
+        timezone=_parse_timezone(data.get("timezone", "Europe/Madrid")),
         state_dir=state_dir,
         config_dir=config_dir,
-        log_level=str(service.get("log_level", "INFO")),
+        log_level=_parse_log_level(service.get("log_level", "INFO")),
         workers=int(service.get("workers", 3)),
         retry_first=parse_duration(retry.get("first", "1m")),
         retry_max=parse_duration(retry.get("max", "15m")),
@@ -322,6 +330,31 @@ def _resolve_node_id(mode: RunMode) -> str:
     if mode is RunMode.PRO:
         raise ConfigError("MIBEL_NODE_ID must be set in pro mode")
     return f"{mode.value}-ingestor"
+
+
+def _parse_quality_profile(value: Any) -> QualityProfile:
+    """Return the quality profile of the mode."""
+    try:
+        return QualityProfile(str(value))
+    except ValueError:
+        expected = ", ".join(member.value for member in QualityProfile)
+        raise ConfigError(f"unknown quality_profile {value!r} (expected one of {expected})") from None
+
+
+def _parse_timezone(value: Any) -> ZoneInfo:
+    """Return the local timezone (an IANA name such as ``Europe/Madrid``)."""
+    try:
+        return ZoneInfo(str(value))
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ConfigError(f"unknown timezone {value!r}") from None
+
+
+def _parse_log_level(value: Any) -> str:
+    """Return a standard logging level name in upper case (``DEBUG`` … ``CRITICAL``)."""
+    level = str(value).upper()
+    if not isinstance(logging.getLevelName(level), int):
+        raise ConfigError(f"unknown log level {value!r}")
+    return level
 
 
 def _build_http(section: dict[str, Any]) -> HttpSettings:
@@ -423,6 +456,15 @@ def _inside_state_dir(value: str, state_dir: Path) -> Path:
     """Resolve a relative path against the state directory; absolute paths are kept."""
     path = Path(value)
     return path if path.is_absolute() else state_dir / path
+
+
+def _parse_env_value(raw: str) -> str:
+    """Return the value of an env-file line: quotes removed, or a trailing `` # comment`` cut if unquoted."""
+    value = raw.strip()
+    is_quoted = len(value) >= 2 and value[0] == value[-1] and value[0] in "'\""
+    if is_quoted:
+        return value[1:-1]
+    return value.split(" #", 1)[0].strip()
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

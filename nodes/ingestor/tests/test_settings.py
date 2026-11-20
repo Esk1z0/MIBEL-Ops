@@ -105,10 +105,40 @@ def test_state_dir_from_systemd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
 def test_env_file_loader(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
-    env_file.write_text("# comment\nESIOS_TOKEN='abc'\nexport AEMET_API_KEY=xyz\n")
+    env_file.write_text(
+        "# comment\n"
+        "ESIOS_TOKEN='abc # not a comment'\n"
+        "export AEMET_API_KEY=xyz  # trailing comment\n"
+        "ENTSOE_TOKEN=a#b\n"
+    )
     settings.load_env_file(env_file)
-    assert settings.read_secret("ESIOS_TOKEN") == "abc"
+    assert settings.read_secret("ESIOS_TOKEN") == "abc # not a comment"
     assert settings.read_secret("AEMET_API_KEY") == "xyz"
+    assert settings.read_secret("ENTSOE_TOKEN") == "a#b"
+
+
+def test_missing_env_file_is_a_config_error(tmp_path: Path) -> None:
+    # ignoring it would silently disable every `enabled: auto` source
+    with pytest.raises(ConfigError, match="env file not found"):
+        settings.load_env_file(tmp_path / "missing.env")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"timezone": "Mars/Olympus"}, "unknown timezone"),
+        ({"service.log_level": "LOUD"}, "unknown log level"),
+        ({"modes.dev.quality_profile": "strict"}, "unknown quality_profile"),
+    ],
+)
+def test_invalid_values_are_config_errors(overrides: dict[str, str], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        settings.load(CONFIG_DIR, "dev", overrides)
+
+
+def test_set_argument_with_invalid_yaml_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="not valid YAML"):
+        settings.parse_set_args(["buffer.path=[unclosed"])
 
 
 def test_null_sink_from_set_argument() -> None:

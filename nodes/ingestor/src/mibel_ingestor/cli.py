@@ -8,7 +8,7 @@ Commands:
 - ``check``: validate the configuration and list the jobs that would run.
 - ``sources``: list the available connectors and why each one is enabled or not.
 
-Exit codes: 0 success, 1 some job failed (``once``), 2 configuration error.
+Exit codes: 0 success, 1 some job or chunk failed (``once``, ``backfill``), 2 configuration error.
 """
 
 from __future__ import annotations
@@ -46,9 +46,9 @@ EXIT_CONFIG_ERROR = 2
 def main(argv: list[str] | None = None) -> int:
     """Parse the arguments, load the configuration and run the chosen command."""
     args = _build_parser().parse_args(argv)
-    if args.env_file:
-        settings.load_env_file(args.env_file)
     try:
+        if args.env_file:
+            settings.load_env_file(args.env_file)
         node_settings = settings.load(args.config, args.mode, settings.parse_set_args(args.set))
     except settings.ConfigError as exc:
         return _config_error(exc)
@@ -65,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         return _config_error(exc)
     try:
         return _run_command(args, node_settings, service)
+    except settings.ConfigError as exc:
+        return _config_error(exc)
     finally:
         service.close()
 
@@ -121,13 +123,14 @@ def _run_command(args: argparse.Namespace, node_settings: settings.Settings, ser
         return EXIT_OK if all(report.succeeded for report in reports) else EXIT_JOB_FAILED
     if args.command == "backfill":
         reports = service.backfill(args.source, args.dataset, args.start, args.end)
+        failed = [report.as_dict() for report in reports if not report.succeeded]
         _print_json({
             "chunks": len(reports),
-            "failed": [report.as_dict() for report in reports if not report.succeeded],
+            "failed": failed,
             "sent": sum(report.sent for report in reports),
             "rejected": sum(report.rejected for report in reports),
         })
-        return EXIT_OK
+        return EXIT_JOB_FAILED if failed else EXIT_OK
     # command == "run"
     if node_settings.metrics.enabled:
         start_metrics_server(node_settings.metrics.host, node_settings.metrics.port)

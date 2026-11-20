@@ -113,7 +113,12 @@ class Service:
         self.scheduler.run_forever()
 
     def run_once(self, source: str | None = None, dataset: str | None = None) -> list[JobReport]:
-        """Run every job once (optionally one source or dataset), then deliver everything produced."""
+        """Run every job once (optionally one source or dataset), then deliver everything produced.
+
+        Raises:
+            ConfigError: the source or dataset filter matches no enabled job (e.g. a typo), which would
+                otherwise look like a successful run that did nothing.
+        """
         reports = []
         for source_name, connector in self.connectors.items():
             if source and source_name != source:
@@ -122,6 +127,8 @@ class Service:
                 if dataset and dataset_name != dataset:
                     continue
                 reports.append(self.pipeline.run(source_name, dataset_name))
+        if not reports:
+            raise ConfigError(f"no enabled job matches source={source!r} dataset={dataset!r}")
         self._deliver_all()
         return reports
 

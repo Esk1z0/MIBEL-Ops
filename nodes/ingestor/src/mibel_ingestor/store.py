@@ -6,7 +6,8 @@ Tables:
   rows live at most ``pending_ttl`` and the file is kept under ``max_bytes``, oldest dropped first
   (NFR-03: 30 days / 1 GB). Only the manager keeps data for real (ADR-05); gaps can be backfilled.
 - ``seen``: last value sent per (source, variable, node, event_time), for change detection: a value
-  polled every 5 min is sent once, and only revisions or new forecast vintages travel again.
+  polled every 5 min is sent once, and it travels again only when its value changes (a revision, or a
+  new forecast vintage with a different value; a vintage that repeats the value is not resent).
 - ``quarantine``: rejected observations with their rule, kept for ``quarantine_ttl``.
 - ``capacity``: installed capacity per technology, for DG-E11.
 - ``backfill_done``: completed (source, dataset, day) chunks, so a backfill can resume.
