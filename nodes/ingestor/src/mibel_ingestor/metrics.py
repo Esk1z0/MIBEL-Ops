@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
-# --------------------------------------------------------------------------- constants
+
+# ##################################################################################################
+# #######################################     CONSTANTS     ########################################
+# ##################################################################################################
+
+
 PREFIX = "mibel_ingestor"
 JOB_DURATION_BUCKETS = (0.25, 1, 2.5, 5, 10, 30, 60, 120)
 
@@ -31,7 +36,11 @@ BUFFER_DROPPED = Counter(f"{PREFIX}_buffer_dropped_total", "Undelivered messages
 DELIVERIES = Counter(f"{PREFIX}_deliveries_total", "Delivery attempts per message", ["status"])
 
 
-# --------------------------------------------------------------------------- public API
+# ##################################################################################################
+# #######################################     PUBLIC API     #######################################
+# ##################################################################################################
+
+
 def start_metrics_server(host: str, port: int) -> None:
     """Expose ``/metrics`` on ``host:port`` in a background thread."""
     start_http_server(port, addr=host)

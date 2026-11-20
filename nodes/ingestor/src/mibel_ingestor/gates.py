@@ -28,7 +28,12 @@ from zoneinfo import ZoneInfo
 from .model import UTC, Nature, Observation, Rejection
 from .settings import ConfigError, QualityProfile, parse_duration
 
-# --------------------------------------------------------------------------- constants
+
+# ##################################################################################################
+# #######################################     CONSTANTS     ########################################
+# ##################################################################################################
+
+
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 SECONDS_PER_DAY = 86400
 DEFAULT_FUTURE_MARGIN = "5m"
@@ -38,7 +43,11 @@ DEFAULT_MAX_FACTOR = 1.05
 DECLARATIVE_CHECKS = frozenset({"contract", "connector"})
 
 
-# --------------------------------------------------------------------------- types
+# ##################################################################################################
+# #########################################     TYPES     ##########################################
+# ##################################################################################################
+
+
 class GateMode(str, Enum):
     """What happens when an observation fails a rule."""
 
@@ -111,7 +120,11 @@ class GateResult:
         }
 
 
-# --------------------------------------------------------------------------- public API
+# ##################################################################################################
+# #######################################     PUBLIC API     #######################################
+# ##################################################################################################
+
+
 class Gates:
     """The edge gates of one quality profile, compiled from ``quality.yaml``."""
 
@@ -156,7 +169,11 @@ class Gates:
         return first_blocking_rule
 
 
-# --------------------------------------------------------------------------- private helpers: compilation
+# ##################################################################################################
+# ##############################     PRIVATE HELPERS: COMPILATION     ##############################
+# ##################################################################################################
+
+
 def _compile_rule(rule_id: str, spec: dict[str, Any], profile: str) -> Rule | None:
     """Compile one criterion for a profile; declarative criteria and ``off`` rules return None.
 
@@ -190,7 +207,11 @@ def _matches_any(variable: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(variable, pattern) for pattern in patterns)
 
 
-# --------------------------------------------------------------------------- private helpers: check builders
+# ##################################################################################################
+# ############################     PRIVATE HELPERS: CHECK BUILDERS     #############################
+# ##################################################################################################
+
+
 # Each builder receives the profile ``value`` and the whole criterion ``spec`` and returns the check.
 def _build_not_null(_value: Any, _spec: dict[str, Any]) -> Check:
     """DG-E02: identifiers present and a finite value."""

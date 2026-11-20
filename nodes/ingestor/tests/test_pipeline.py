@@ -21,6 +21,7 @@ from mibel_ingestor.store import Store
 
 from conftest import MADRID
 
+
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
 FAKE_DATASETS = {
     "demand": {

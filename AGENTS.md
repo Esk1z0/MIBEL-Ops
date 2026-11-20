@@ -106,4 +106,19 @@ Every module follows the same order:
 5. **Public API**: what other modules use.
 6. Private helpers (`_name`), at the end.
 
-Group related methods inside a class with uniform section separators: `# --- windows ---`.
+**Section banners.** Each top-level section starts with a three-line banner, 100 columns wide, title in UPPERCASE and centred, with **two blank lines before and after** so it stands out when scrolling and in the minimap:
+
+```python
+
+
+# ##################################################################################################
+# ################################     PRIVATE HELPERS: LOADING     ################################
+# ##################################################################################################
+
+
+def _resolve_mode(mode: str | None) -> RunMode:
+```
+
+- Titles: `CONSTANTS`, `TYPES`, `PUBLIC API`, `PRIVATE HELPERS`; add a sub-topic after a colon when a section is split (`PRIVATE HELPERS: LOADING`, `PUBLIC API: REGISTRY`). Test modules use the same banner to group tests (`OMIE`, `ESIOS`).
+- Ruff keeps two blank lines after the imports (`lines-after-imports = 2`), so the first banner has the same margin.
+- Inside a class, group related methods with a lighter one-line separator and one blank line around it: `# --- windows ---`.

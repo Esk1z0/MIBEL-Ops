@@ -9,12 +9,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+
 sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 
 from mibel_ingestor import settings as settings_module
 from mibel_ingestor.connectors import Connector, get_connector_class
 from mibel_ingestor.http import HttpClient
 from mibel_ingestor.settings import SourceSettings
+
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 MADRID = ZoneInfo("Europe/Madrid")

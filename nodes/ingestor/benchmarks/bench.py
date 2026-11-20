@@ -33,6 +33,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "tests" / "fixtures"))
 
@@ -48,9 +49,15 @@ from mibel_ingestor.service import Service  # noqa: E402
 from mibel_ingestor.sinks import NullSink  # noqa: E402
 from mibel_ingestor.store import Store  # noqa: E402
 
+
 IMPORT_SECONDS = time.perf_counter() - IMPORT_START
 
-# --------------------------------------------------------------------------- constants
+
+# ##################################################################################################
+# #######################################     CONSTANTS     ########################################
+# ##################################################################################################
+
+
 # Fixed clock: identical windows, and therefore identical work, on every machine
 REFERENCE_NOW = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
 FAR_FUTURE = datetime(2100, 1, 1, tzinfo=UTC)
@@ -61,7 +68,11 @@ DAYS_IN_MIBGAS_FILE = 365
 RESULTS_DIR = HERE / "results"
 
 
-# --------------------------------------------------------------------------- types
+# ##################################################################################################
+# #########################################     TYPES     ##########################################
+# ##################################################################################################
+
+
 @dataclass(frozen=True)
 class OfflineSetup:
     """Dev settings and every connector, built without network or real secrets."""
@@ -93,7 +104,11 @@ class PreparedJob:
         return round(sum(len(payload) for payload in self.payload_by_request.values()) / 1e3, 1)
 
 
-# --------------------------------------------------------------------------- public API
+# ##################################################################################################
+# #######################################     PUBLIC API     #######################################
+# ##################################################################################################
+
+
 def main() -> int:
     """Run the chosen benchmark and write its JSON result (or print a comparison)."""
     args = _build_parser().parse_args()
@@ -215,7 +230,11 @@ def compare(first_path: Path, second_path: Path) -> None:
     _print_general_comparison(first, second)
 
 
-# --------------------------------------------------------------------------- private helpers: offline
+# ##################################################################################################
+# ################################     PRIVATE HELPERS: OFFLINE     ################################
+# ##################################################################################################
+
+
 def _set_dummy_secrets() -> None:
     """Enable every source with dummy tokens: offline runs never contact the APIs."""
     for name in SECRETS:
@@ -387,7 +406,11 @@ def _synthetic_moments(dataset: Dataset, window: Window) -> list[datetime]:
     return moments
 
 
-# --------------------------------------------------------------------------- private helpers: online and machine
+# ##################################################################################################
+# ##########################     PRIVATE HELPERS: ONLINE AND MACHINE     ###########################
+# ##################################################################################################
+
+
 def _summarize_online_job(report: JobReport) -> dict[str, Any]:
     """Return status, size and per-stage wall/CPU milliseconds of one real job."""
     summary: dict[str, Any] = {
@@ -417,7 +440,11 @@ def _read_linux_hardware() -> dict[str, Any]:
     return hardware
 
 
-# --------------------------------------------------------------------------- private helpers: output
+# ##################################################################################################
+# ################################     PRIVATE HELPERS: OUTPUT     #################################
+# ##################################################################################################
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with its subcommands."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

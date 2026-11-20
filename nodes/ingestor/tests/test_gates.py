@@ -12,6 +12,7 @@ from mibel_ingestor.model import UTC, Nature, Observation
 
 from conftest import CONFIG_DIR, MADRID
 
+
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
 ONE_HOUR_AGO = NOW - timedelta(hours=1)
 

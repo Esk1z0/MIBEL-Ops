@@ -41,6 +41,7 @@ ignore = ["RUF001", "RUF002", "RUF003"]   # en dashes and arrows in docstrings a
 
 [tool.ruff.lint.isort]
 known-local-folder = ["conftest", "synthetic"]
+lines-after-imports = 2      # margin before the first section banner (AGENTS.md §8.6)
 
 [tool.mypy]
 python_version = "3.10"

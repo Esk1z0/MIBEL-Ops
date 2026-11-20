@@ -11,6 +11,7 @@ from mibel_ingestor.store import Store
 
 from conftest import MADRID
 
+
 BASE_TIME = datetime(2026, 11, 11, 10, tzinfo=UTC)
 
 
@@ -29,7 +30,11 @@ def local(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=MADRID)
 
 
-# --- store ---
+# ##################################################################################################
+# #########################################     STORE     ##########################################
+# ##################################################################################################
+
+
 def test_change_detection() -> None:
     store = Store(":memory:")
     first = [demand(0, 1), demand(15, 2)]
@@ -76,7 +81,11 @@ def test_backfill_progress() -> None:
     assert store.is_backfill_done("omie", "day_ahead", "2026-01-01")
 
 
-# --- scheduler ---
+# ##################################################################################################
+# #######################################     SCHEDULER     ########################################
+# ##################################################################################################
+
+
 def test_next_slot_alignment() -> None:
     assert find_next_slot(local(2026, 11, 11, 10, 3), 300, 60, MADRID) == local(2026, 11, 11, 10, 6)
     assert find_next_slot(local(2026, 11, 11, 10, 6), 300, 60, MADRID) == local(2026, 11, 11, 10, 11)

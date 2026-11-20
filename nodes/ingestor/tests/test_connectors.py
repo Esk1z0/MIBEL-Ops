@@ -14,6 +14,7 @@ from mibel_ingestor.settings import ConfigError
 import synthetic
 from conftest import MADRID, make_connector
 
+
 QUARTER_HOUR = timedelta(minutes=15)
 
 
@@ -27,7 +28,11 @@ def utc_window(start: datetime, end: datetime, mode: CaptureMode = CaptureMode.L
     return Window(start, end, mode)
 
 
-# --- registry ---
+# ##################################################################################################
+# ########################################     REGISTRY     ########################################
+# ##################################################################################################
+
+
 def test_registry_lists_every_source_module() -> None:
     assert available_sources() == ["aemet", "entsoe", "esios", "mibgas", "omie", "open_meteo", "redata"]
 
@@ -37,7 +42,11 @@ def test_unknown_source_is_a_config_error() -> None:
         get_connector_class("nope")
 
 
-# --- OMIE ---
+# ##################################################################################################
+# ##########################################     OMIE     ##########################################
+# ##################################################################################################
+
+
 def test_omie_day_ahead_quarter_hours_in_utc() -> None:
     connector = make_connector("omie")
     result = connector.parse(
@@ -117,7 +126,11 @@ def test_omie_requests_one_file_per_local_day_and_session() -> None:
     assert len(filenames) == 6
 
 
-# --- ESIOS ---
+# ##################################################################################################
+# #########################################     ESIOS     ##########################################
+# ##################################################################################################
+
+
 def test_esios_geos_split_one_response_into_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ESIOS_TOKEN", "dummy")
     connector = make_connector("esios")
@@ -151,7 +164,11 @@ def test_esios_without_token_fails_cleanly() -> None:
         connector.requests(connector.datasets["demand_real"], window)
 
 
-# --- REData ---
+# ##################################################################################################
+# #########################################     REDATA     #########################################
+# ##################################################################################################
+
+
 def test_redata_series_mapping() -> None:
     connector = make_connector("redata")
     moment = datetime(2026, 11, 11, 10, 5, tzinfo=MADRID)
@@ -169,7 +186,11 @@ def test_redata_error_document() -> None:
         connector.parse(connector.datasets["demand_real_time"], fake_request(), b'{"errors": [{"code": 500}]}')
 
 
-# --- Open-Meteo ---
+# ##################################################################################################
+# #######################################     OPEN-METEO     #######################################
+# ##################################################################################################
+
+
 def test_open_meteo_derives_wind_at_100m_and_drops_nulls() -> None:
     connector = make_connector("open_meteo")
     params = ["wind_speed_80m", "wind_speed_120m", "direct_radiation", "diffuse_radiation", "cloud_cover",
@@ -201,7 +222,11 @@ def test_open_meteo_satellite_only_for_solar_nodes() -> None:
     assert {request.meta["node"] for request in requests} == {"extremadura", "andalucia"}
 
 
-# --- MIBGAS ---
+# ##################################################################################################
+# #########################################     MIBGAS     #########################################
+# ##################################################################################################
+
+
 def test_mibgas_workbook() -> None:
     pytest.importorskip("openpyxl")
     connector = make_connector("mibgas")
@@ -220,7 +245,11 @@ def test_mibgas_missing_sheet() -> None:
         connector.parse(connector.datasets["daily_index"], fake_request(), payload)
 
 
-# --- AEMET ---
+# ##################################################################################################
+# #########################################     AEMET     ##########################################
+# ##################################################################################################
+
+
 def test_aemet_records() -> None:
     connector = make_connector("aemet")
     payload = synthetic.aemet(datetime(2026, 11, 11, tzinfo=UTC), 6)
@@ -238,7 +267,11 @@ def test_aemet_backfill_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
         connector.requests(connector.datasets["stations"], window)
 
 
-# --- ENTSO-E ---
+# ##################################################################################################
+# ########################################     ENTSO-E     #########################################
+# ##################################################################################################
+
+
 def test_entsoe_a03_forward_fill() -> None:
     connector = make_connector("entsoe")
     first_hour = datetime(2026, 11, 10, 23, tzinfo=UTC)

@@ -14,14 +14,23 @@ from typing import Any
 from ..model import ContractError, ParseResult, Request, Window, parse_iso
 from .base import Connector, Dataset, register
 
-# --------------------------------------------------------------------------- constants
+
+# ##################################################################################################
+# #######################################     CONSTANTS     ########################################
+# ##################################################################################################
+
+
 URL = "https://apidatos.ree.es/en/datos/{category}/{widget}"
 LOCAL_TIME_FORMAT = "%Y-%m-%dT%H:%M"
 DEFAULT_NODE = "ES"
 ERROR_PREVIEW_CHARS = 120
 
 
-# --------------------------------------------------------------------------- public API
+# ##################################################################################################
+# #######################################     PUBLIC API     #######################################
+# ##################################################################################################
+
+
 def slugify(text: str) -> str:
     """Turn a series title into a lowercase identifier: ``'Solar photovoltaic'`` → ``'solar_photovoltaic'``."""
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
@@ -88,7 +97,11 @@ class Redata(Connector):
             result.add(self.make_observation(variable, node, parse_iso(point["datetime"]), value, unit))
 
 
-# --------------------------------------------------------------------------- private helpers
+# ##################################################################################################
+# ####################################     PRIVATE HELPERS     #####################################
+# ##################################################################################################
+
+
 def _load_document(payload: bytes) -> dict[str, Any]:
     """Return a REData JSON document that has an ``included`` list.
 
