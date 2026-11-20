@@ -18,7 +18,7 @@ from datetime import date, timedelta
 from .connectors import Connector, available_sources, build_connector
 from .gates import Gates
 from .http import HttpClient
-from .pipeline import JobReport, Pipeline
+from .pipeline import MAX_FLOOR_SECONDS, JobReport, Pipeline
 from .scheduler import Scheduler
 from .settings import ConfigError, Settings, SourceSettings
 from .sinks import Sink, build_sink
@@ -98,6 +98,7 @@ class Service:
         self.connectors = self._build_connectors(only)
         if not self.connectors:
             raise ConfigError("no source enabled")
+        self._check_change_detection_memory()
         self.pipeline = Pipeline(settings, self.store, self.gates, self.connectors)
         self.scheduler = Scheduler(settings, self.pipeline, self.store, self.sink)
 
@@ -167,6 +168,24 @@ class Service:
                 continue
             connectors[name] = build_connector(source_settings, self._new_http_client, self.settings.timezone)
         return connectors
+
+    def _check_change_detection_memory(self) -> None:
+        """Refuse a ``buffer.seen_ttl`` shorter than any live window.
+
+        Change detection forgets values whose period is older than ``seen_ttl``. A value still inside a
+        live window but already forgotten would be sent again, as new, on every poll. The window start
+        is floored by up to ``MAX_FLOOR_SECONDS``, which is added as a margin.
+        """
+        seen_ttl = self.settings.buffer.seen_ttl
+        for source, connector in self.connectors.items():
+            for dataset in connector.datasets.values():
+                needed = dataset.window_back + MAX_FLOOR_SECONDS
+                if needed <= seen_ttl:
+                    continue
+                raise ConfigError(
+                    f"buffer.seen_ttl ({seen_ttl / 86400:g} d) must cover the live window of "
+                    f"{source}/{dataset.name} (back {dataset.window_back / 86400:g} d + 1 h)"
+                )
 
     @staticmethod
     def _should_run(name: str, source_settings: SourceSettings, only: set[str] | None) -> bool:

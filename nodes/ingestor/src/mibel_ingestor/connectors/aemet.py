@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 
 from ..model import UTC, ContractError, ParseResult, Request, Window
+from ..settings import ConfigError
 from .base import Connector, Dataset, register
 
 
@@ -51,8 +52,11 @@ class Aemet(Connector):
     secrets = ("AEMET_API_KEY",)
 
     def validate(self, dataset: Dataset) -> None:
-        """Require ``stations`` (node → station id) and ``variables``."""
+        """Require ``stations`` (node → station id) and ``variables`` (field → ``{variable, unit}``)."""
         self.require_options(dataset, "stations", "variables")
+        for field, spec in dataset.options["variables"].items():
+            if not isinstance(spec, dict) or "variable" not in spec or "unit" not in spec:
+                raise ConfigError(f"aemet dataset {dataset.name!r}: field {field!r} needs 'variable' and 'unit'")
 
     def requests(self, dataset: Dataset, window: Window) -> list[Request]:
         """Request each configured station (the key travels in a header).

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -147,6 +148,15 @@ def test_esios_geos_split_one_response_into_nodes(monkeypatch: pytest.MonkeyPatc
     assert result.steps == {"filter:geo_not_configured": 1, "null_dropped": 1}
 
 
+def test_esios_malformed_time_breaks_the_contract() -> None:
+    connector = make_connector("esios")
+    payload = synthetic.esios([synthetic.EsiosPoint(datetime(2026, 11, 11, 10, tzinfo=UTC), "España", 90.0)])
+    broken = json.loads(payload)
+    broken["indicator"]["values"][0]["datetime_utc"] = "yesterday"
+    with pytest.raises(ContractError, match="invalid timestamp"):
+        connector.parse(connector.datasets["price_day_ahead"], fake_request(), json.dumps(broken).encode())
+
+
 def test_esios_request_is_secret_and_token_not_in_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ESIOS_TOKEN", "super-secret")
     connector = make_connector("esios")
@@ -184,6 +194,15 @@ def test_redata_error_document() -> None:
     connector = make_connector("redata")
     with pytest.raises(ContractError):
         connector.parse(connector.datasets["demand_real_time"], fake_request(), b'{"errors": [{"code": 500}]}')
+
+
+def test_redata_value_without_datetime_breaks_the_contract() -> None:
+    connector = make_connector("redata")
+    payload = synthetic.redata({"Real": [(datetime(2026, 11, 11, 10, 5, tzinfo=MADRID), 30000.0)]})
+    broken = json.loads(payload)
+    del broken["included"][0]["attributes"]["values"][0]["datetime"]
+    with pytest.raises(ContractError, match="datetime"):
+        connector.parse(connector.datasets["demand_real_time"], fake_request(), json.dumps(broken).encode())
 
 
 # ##################################################################################################
@@ -265,6 +284,13 @@ def test_aemet_backfill_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     window = utc_window(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC), CaptureMode.BACKFILL)
     with pytest.raises(NotImplementedError):
         connector.requests(connector.datasets["stations"], window)
+
+
+def test_aemet_variable_without_unit_is_a_config_error() -> None:
+    connector = make_connector("aemet")
+    dataset = Dataset.from_settings("stations", {"stations": {"aragon": "9311X"}, "variables": {"vv": "m/s"}})
+    with pytest.raises(ConfigError, match="'variable' and 'unit'"):
+        connector.validate(dataset)
 
 
 # ##################################################################################################

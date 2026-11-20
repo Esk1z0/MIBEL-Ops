@@ -5,15 +5,17 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, datetime, timedelta
 
+import pytest
+
 from mibel_ingestor.model import OutgoingMessage, Request, Window
 from mibel_ingestor.pipeline import JobReport, JobStatus
 from mibel_ingestor.service import Service, describe_sources
-from mibel_ingestor.settings import Settings
+from mibel_ingestor.settings import ConfigError, Settings, load
 from mibel_ingestor.sinks import NullSink, Sink
 from mibel_ingestor.store import Store
 
 import synthetic
-from conftest import MADRID
+from conftest import CONFIG_DIR, MADRID
 
 
 class BrokenSink:
@@ -101,3 +103,10 @@ def test_crashed_job_is_logged_and_retried_with_backoff(settings: Settings) -> N
     assert job.failures == 1
     # rescheduled into the future instead of keeping its past next_run (which resubmitted it every loop)
     assert before < job.next_run <= before + timedelta(seconds=settings.retry_first + 5)
+
+
+def test_seen_ttl_shorter_than_a_live_window_is_refused() -> None:
+    # mibgas looks 7 days back: forgetting sent values after 1 day would resend them on every poll
+    short_memory = load(CONFIG_DIR, "dev", {"sink.type": "null", "buffer.seen_ttl": "1d"})
+    with pytest.raises(ConfigError, match="seen_ttl"):
+        Service(short_memory, store=Store(":memory:"), only={"mibgas"})

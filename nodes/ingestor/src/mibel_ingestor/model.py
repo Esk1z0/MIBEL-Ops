@@ -179,9 +179,13 @@ def parse_iso(text: str) -> datetime:
     """Parse an ISO-8601 timestamp that must carry a timezone, returning it in UTC.
 
     Raises:
-        ContractError: the timestamp has no timezone, so its meaning would be ambiguous.
+        ContractError: the text is not a timestamp, or it has no timezone, so its meaning would be
+            ambiguous. Timestamps come from source payloads, so both break the source contract (DG-E01).
     """
-    moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    try:
+        moment = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        raise ContractError(f"invalid timestamp: {text!r}") from None
     if moment.tzinfo is None:
         raise ContractError(f"timestamp without timezone: {text!r}")
     return moment.astimezone(UTC)

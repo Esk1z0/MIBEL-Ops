@@ -94,7 +94,10 @@ class Redata(Connector):
             if value is None:
                 result.count_step("null_dropped")
                 continue
-            result.add(self.make_observation(variable, node, parse_iso(point["datetime"]), value, unit))
+            moment = point.get("datetime")
+            if moment is None:
+                raise ContractError("REData: value without datetime")
+            result.add(self.make_observation(variable, node, parse_iso(moment), value, unit))
 
 
 # ##################################################################################################
