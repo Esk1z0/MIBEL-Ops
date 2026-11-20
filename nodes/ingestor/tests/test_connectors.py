@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from mibel_ingestor.connectors import available_sources, get_connector_class
+from mibel_ingestor.connectors import Dataset, available_sources, get_connector_class
 from mibel_ingestor.model import UTC, CaptureMode, ContractError, NotAvailable, Request, Window
 from mibel_ingestor.settings import ConfigError
 
@@ -295,3 +295,22 @@ def test_entsoe_token_only_in_secret_request(monkeypatch: pytest.MonkeyPatch) ->
     assert request.secret
     assert request.params["periodStart"] == "202611100000"
     assert "tok" not in str(request.meta)
+
+
+# ##################################################################################################
+# ####################################     DATASET SETTINGS     ####################################
+# ##################################################################################################
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [{"every": "0s"}, {"every": "1h", "offset": "24h"}, {"every": "1h", "offset": "-5m"}],
+)
+def test_impossible_schedule_is_a_config_error(schedule: dict[str, str]) -> None:
+    with pytest.raises(ConfigError, match="schedule"):
+        Dataset.from_settings("broken", {"schedule": schedule})
+
+
+def test_zero_resolution_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="resolution"):
+        Dataset.from_settings("broken", {"resolution": "0s"})

@@ -26,8 +26,8 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from . import metrics
-from .model import utc_now
-from .pipeline import JobReport, Pipeline
+from .model import UTC, CaptureMode, utc_now
+from .pipeline import JobReport, JobStatus, Pipeline
 from .settings import Settings
 from .sinks import Sink
 from .store import PendingMessage, Store
@@ -47,6 +47,8 @@ MAX_SLEEP_S = 30.0
 MAX_DELIVERY_DELAY_S = 300.0
 # Days searched for the next slot: today, tomorrow and a safety margin
 SLOT_SEARCH_DAYS = 3
+# Largest DST shift of the local timezone (1 h in Spain): bounds how far wall-clock order and UTC order differ
+DST_SHIFT_MARGIN = timedelta(hours=1)
 MAX_ERROR_CHARS = 200
 
 
@@ -81,17 +83,22 @@ class Job:
 def find_next_slot(after: datetime, every: float, offset: float, local_timezone: ZoneInfo) -> datetime:
     """Return the first slot strictly after ``after``: local midnight + offset + k·every.
 
-    Slots follow the local wall clock, so an hourly job keeps its minute across DST changes.
+    Slots follow the local wall clock, so an hourly job keeps its minute across DST changes. In the
+    repeated autumn hour a wall-clock slot happens twice and the job runs in both passes. Instants are
+    compared in UTC: aware datetimes sharing a tzinfo compare as wall-clock times, which in the repeated
+    hour returned a slot in the past and made jobs run back to back for an hour.
 
     Raises:
-        ValueError: no slot exists in the next days (inconsistent ``every``/``offset``).
+        ValueError: ``every`` is not positive, or no slot exists in the next days (``offset`` ≥ 24 h).
     """
-    local_after = after.astimezone(local_timezone)
-    day = local_after.date()
+    if every <= 0:
+        raise ValueError(f"schedule every must be positive, got {every} s")
+    after_utc = after.astimezone(UTC)
+    day = after.astimezone(local_timezone).date()
     for _ in range(SLOT_SEARCH_DAYS):
-        slot = _first_slot_of_day_after(day, every, offset, local_timezone, local_after)
-        if slot is not None:
-            return slot.astimezone(after.tzinfo)
+        upcoming = _first_slot_of_day_after(day, every, offset, local_timezone, after_utc)
+        if upcoming is not None:
+            return upcoming.astimezone(after.tzinfo)
         day += timedelta(days=1)
     raise ValueError("no slot found (check schedule every/offset)")
 
@@ -195,8 +202,19 @@ class Scheduler:
                 job.future = pool.submit(self._run_job, job)
 
     def _run_job(self, job: Job) -> JobReport:
-        """Run a job on the pool and schedule its next run."""
-        report = self.pipeline.run(job.source, job.dataset)
+        """Run a job on the pool and schedule its next run, whatever happens inside the run.
+
+        ``Pipeline.run`` already turns source errors into a report. An exception that still escapes (a
+        bug, or a store that cannot write, e.g. a full SD card) is logged and handled as a failed run:
+        otherwise the job would keep its past ``next_run`` and be resubmitted every loop, silently.
+        """
+        try:
+            report = self.pipeline.run(job.source, job.dataset)
+        except Exception as exc:  # see docstring: the scheduler must keep running and keep the backoff
+            error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+            log.error("job crashed", extra={"source": job.source, "dataset": job.dataset, "error": error})
+            report = JobReport(job.source, job.dataset, CaptureMode.LIVE.value)
+            report.fail(JobStatus.ERROR, error)
         self._schedule_next_run(job, report)
         return report
 
@@ -249,20 +267,55 @@ def _first_slot_of_day_after(
     every: float,
     offset: float,
     local_timezone: ZoneInfo,
-    local_after: datetime,
+    after_utc: datetime,
 ) -> datetime | None:
-    """Return the first slot of ``day`` (local) strictly after ``local_after``, or None if there is none.
+    """Return the earliest slot of ``day`` (local) strictly after ``after_utc``, in UTC, or None.
 
     Slots are built on the naive wall clock (midnight + offset + k·every) and only then given the
-    timezone, which keeps them on the same wall-clock minute across DST changes.
+    timezone, which keeps them on the same wall-clock minute across DST changes. The earliest instant
+    is searched over the whole day because the second pass of the repeated hour comes after later
+    wall-clock slots of the first pass.
     """
     midnight = datetime.combine(day, time(0))
-    step = 0
+    local_after = after_utc.astimezone(local_timezone).replace(tzinfo=None)
+    step = _first_step_to_check(midnight, every, offset, local_after)
+    earliest = None
     while True:
         wall_clock = midnight + timedelta(seconds=offset + step * every)
         if wall_clock.date() != midnight.date():
-            return None
-        slot = wall_clock.replace(tzinfo=local_timezone)
-        if slot > local_after:
-            return slot
+            return earliest
+        instants = _instants_of_wall_clock(wall_clock, local_timezone)
+        # later wall-clock slots are at least this far on: none of them can be earlier than `earliest`
+        if earliest is not None and instants[0] - DST_SHIFT_MARGIN > earliest:
+            return earliest
+        for instant in instants:
+            if instant > after_utc and (earliest is None or instant < earliest):
+                earliest = instant
         step += 1
+
+
+def _first_step_to_check(midnight: datetime, every: float, offset: float, local_after: datetime) -> int:
+    """Return the first slot step of the day that may fall after ``local_after`` (naive wall clock).
+
+    Skipping the earlier steps keeps the search cheap on the Pi; the DST margin keeps the slots of the
+    repeated hour's second pass, whose wall clock is up to one shift behind.
+    """
+    seconds_after_first_slot = (local_after - DST_SHIFT_MARGIN - midnight).total_seconds() - offset
+    return max(0, int(seconds_after_first_slot // every))
+
+
+def _instants_of_wall_clock(wall_clock: datetime, local_timezone: ZoneInfo) -> list[datetime]:
+    """Return the UTC instants a local wall-clock time denotes: two in the repeated autumn hour, else one.
+
+    A time skipped by the spring change does not exist; it is mapped with its pre-change offset (fold 0),
+    which lands just after the gap, so the job still runs once.
+    """
+    instants: list[datetime] = []
+    for fold in (0, 1):
+        instant = wall_clock.replace(tzinfo=local_timezone, fold=fold).astimezone(UTC)
+        exists = instant.astimezone(local_timezone).replace(tzinfo=None) == wall_clock
+        if exists and instant not in instants:
+            instants.append(instant)
+    if not instants:
+        instants.append(wall_clock.replace(tzinfo=local_timezone).astimezone(UTC))
+    return instants

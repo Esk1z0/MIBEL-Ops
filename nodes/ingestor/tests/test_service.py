@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime, timedelta
 
-from mibel_ingestor.model import OutgoingMessage, Request
+from mibel_ingestor.model import OutgoingMessage, Request, Window
 from mibel_ingestor.pipeline import JobReport, JobStatus
 from mibel_ingestor.service import Service, describe_sources
 from mibel_ingestor.settings import Settings
@@ -83,3 +84,20 @@ def test_describe_sources_explains_disabled_sources(settings: Settings) -> None:
     assert not statuses["entsoe"].enabled
     assert "ENTSOE_TOKEN" in statuses["entsoe"].reason
     assert statuses["omie"].enabled
+
+
+def test_crashed_job_is_logged_and_retried_with_backoff(settings: Settings) -> None:
+    service = omie_service(settings)
+    job = service.scheduler.jobs[0]
+
+    def crash(source: str, dataset_name: str, window: Window | None = None) -> JobReport:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    service.pipeline.run = crash  # type: ignore[method-assign]
+    before = datetime.now(MADRID)
+    report = service.scheduler._run_job(job)
+    assert report.status is JobStatus.ERROR
+    assert "disk is full" in report.error
+    assert job.failures == 1
+    # rescheduled into the future instead of keeping its past next_run (which resubmitted it every loop)
+    assert before < job.next_run <= before + timedelta(seconds=settings.retry_first + 5)

@@ -37,6 +37,7 @@ from ..settings import ConfigError, SourceSettings, parse_duration, read_secret
 
 
 BASE_MODULE = "base"
+SECONDS_PER_DAY = 86400.0
 
 
 # ##################################################################################################
@@ -68,12 +69,12 @@ class Dataset:
         """Build a dataset from its merged YAML options, applying the generic defaults.
 
         Raises:
-            ConfigError: an invalid nature or duration.
+            ConfigError: an invalid nature or duration, or an impossible schedule.
         """
         schedule = options.get("schedule") or {}
         window = options.get("window") or {}
         try:
-            return cls(
+            dataset = cls(
                 name=name,
                 nature=Nature(options.get("nature", Nature.OBSERVATION.value)),
                 resolution=parse_duration(options.get("resolution", "15m")),
@@ -84,8 +85,25 @@ class Dataset:
                 publication=dict(options.get("publication") or {}),
                 options=options,
             )
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, AttributeError) as exc:
             raise ConfigError(f"dataset {name!r}: {exc}") from None
+        dataset._check_durations()
+        return dataset
+
+    def _check_durations(self) -> None:
+        """Refuse durations the scheduler and the gates cannot work with.
+
+        ``every = 0`` would spin a worker forever and ``offset ≥ 24 h`` has no slot in a day; a zero
+        resolution would divide by zero in the grid gate DG-E03.
+        """
+        if self.schedule_every <= 0:
+            raise ConfigError(f"dataset {self.name!r}: schedule.every must be positive")
+        if not 0 <= self.schedule_offset < SECONDS_PER_DAY:
+            raise ConfigError(f"dataset {self.name!r}: schedule.offset must be in [0, 24h)")
+        if self.resolution <= 0:
+            raise ConfigError(f"dataset {self.name!r}: resolution must be positive")
+        if self.window_back < 0 or self.window_ahead < 0:
+            raise ConfigError(f"dataset {self.name!r}: window back/ahead cannot be negative")
 
 
 class Connector(ABC):
