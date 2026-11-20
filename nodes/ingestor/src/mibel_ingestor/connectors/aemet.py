@@ -22,6 +22,8 @@ from .base import Connector, Dataset, register
 
 URL = "https://opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/{station}"
 TIME_FORMATS = ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S")
+# The `datos` URL comes from a downloaded (untrusted) answer: only AEMET's own HTTPS host is followed
+DATA_URL_PREFIX = "https://opendata.aemet.es/"
 
 
 # ##################################################################################################
@@ -76,14 +78,16 @@ class Aemet(Connector):
         """Follow AEMET's two-step API: ask for the ``datos`` URL, then download the records.
 
         Raises:
-            ContractError: the first call did not return a ``datos`` URL.
+            ContractError: the first call did not return a ``datos`` URL on AEMET's HTTPS host.
         """
         try:
             first_answer = json.loads(self.http.get(request))
-            data_url = first_answer["datos"]
+            data_url = str(first_answer["datos"])
         except (ValueError, KeyError, TypeError):
             raise ContractError("AEMET: first call did not return a 'datos' URL") from None
-        return self.http.get(Request(str(data_url), secret=True))
+        if not data_url.startswith(DATA_URL_PREFIX):
+            raise ContractError(f"AEMET: 'datos' URL is not on {DATA_URL_PREFIX}")
+        return self.http.get(Request(data_url, secret=True))
 
     def parse(self, dataset: Dataset, request: Request, payload: bytes) -> ParseResult:
         """Parse the station records into one observation per configured field and hour."""

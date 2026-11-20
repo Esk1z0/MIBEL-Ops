@@ -286,6 +286,24 @@ def test_aemet_backfill_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
         connector.requests(connector.datasets["stations"], window)
 
 
+@pytest.mark.parametrize(
+    "data_url",
+    ["http://opendata.aemet.es/opendata/sh/x", "https://127.0.0.1/x", "https://opendata.aemet.es.example/x"],
+)
+def test_aemet_follows_only_its_own_https_data_url(monkeypatch: pytest.MonkeyPatch, data_url: str) -> None:
+    connector = make_connector("aemet")
+    followed: list[str] = []
+
+    def fake_get(request: Request) -> bytes:
+        followed.append(request.url)
+        return json.dumps({"estado": 200, "datos": data_url}).encode()
+
+    monkeypatch.setattr(connector.http, "get", fake_get)
+    with pytest.raises(ContractError, match="not on"):
+        connector.download(Request("https://opendata.aemet.es/opendata/api/x", secret=True))
+    assert followed == ["https://opendata.aemet.es/opendata/api/x"]  # the untrusted URL was never requested
+
+
 def test_aemet_variable_without_unit_is_a_config_error() -> None:
     connector = make_connector("aemet")
     dataset = Dataset.from_settings("stations", {"stations": {"aragon": "9311X"}, "variables": {"vv": "m/s"}})
