@@ -2,6 +2,8 @@
 
 Distributed MLOps platform that **forecasts, every 15 minutes, the price of the upcoming quarter-hours of the Spanish intraday electricity market**. It is organised by node role: ingestors (1..N), one coordinating manager (1) and compute nodes (0..N, home or cloud).
 
+**Current progress, next step and pending decisions: [STATUS.md](STATUS.md).**
+
 | Document | Content |
 |---|---|
 | [01_requirements.md](01_requirements.md) | Vision, measurable goals, target variable, roles and operating modes, 19 functional and 12 non-functional requirements, risks and future work |

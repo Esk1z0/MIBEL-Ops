@@ -1,7 +1,7 @@
 # AGENTS.md — Rules for AI agents in MIBEL-Ops
 
 > Applies to any agent (Claude Code, Copilot, Codex…) working in this repository.
-> Project context: [docs/README.md](docs/README.md) · Decisions: [docs/06_technical_decisions.md](docs/06_technical_decisions.md)
+> Project context: [docs/README.md](docs/README.md) · Decisions: [docs/06_technical_decisions.md](docs/06_technical_decisions.md) · Progress: [docs/STATUS.md](docs/STATUS.md)
 
 ## 1. General principle
 The repository is **public** and the system runs on **personal machines**. When in doubt about security, data or git: **stop and ask**.
@@ -65,6 +65,7 @@ Every reply in which something was created, modified or deleted must include:
 ## 7. Consistency with the documentation
 - If the code departs from what is documented in `docs/`, update the document in the same change or flag it explicitly.
 - Any new or modified decision is recorded in [docs/06_technical_decisions.md](docs/06_technical_decisions.md) (ADR-00).
+- Update [docs/STATUS.md](docs/STATUS.md) in the same change whenever the project state changes (work done, next step, pending decision, test evidence). Read it first when starting a session.
 
 ## 8. Code style (readability first)
 Code is reviewed **function by function** by the maintainer. Write it so that each function can be understood without reading its body or the rest of the file. These rules apply to all new or modified Python code; when touching an existing function, bring it up to this style.
@@ -122,3 +123,12 @@ def _resolve_mode(mode: str | None) -> RunMode:
 - Titles: `CONSTANTS`, `TYPES`, `PUBLIC API`, `PRIVATE HELPERS`; add a sub-topic after a colon when a section is split (`PRIVATE HELPERS: LOADING`, `PUBLIC API: REGISTRY`). Test modules use the same banner to group tests (`OMIE`, `ESIOS`).
 - Ruff keeps two blank lines after the imports (`lines-after-imports = 2`), so the first banner has the same margin.
 - Inside a class, group related methods with a lighter one-line separator and one blank line around it: `# --- windows ---`.
+
+## 9. Working in increments
+The maintainer reviews every change before it grows. Work in small, confirmed steps:
+
+1. **Plan first.** Before writing code, list the classes/functions to create or change, one line each, and every open decision. Wait for the OK.
+2. **One class at a time.** Write one class (or one small group of related functions) with its tests, run lint and tests, show it and **stop** until the maintainer confirms it does what was asked.
+3. **No unrequested decisions.** If something needs a choice that is not in the request or in `docs/` (a new option, a threshold, a dependency, a behaviour change), ask; do not pick one silently.
+4. **No extra scope.** Fixes or ideas found on the way are listed, not implemented.
+5. **Exceptions:** mechanical changes the maintainer asked for in bulk (renames, formatting) may be done in one step.
