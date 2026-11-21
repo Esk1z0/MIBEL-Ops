@@ -67,6 +67,7 @@ coverage.xml
 # API dumps and downloaded OMIE files
 downloads/
 raw_dumps/
+_cache/
 *.zip
 *.gz
 # Small synthetic test fixtures: these ARE versioned
@@ -96,7 +97,12 @@ models/
 *.sqlite3
 *.db
 *.db-journal
+*.sqlite-wal
+*.sqlite-shm
 buffer/
+.state/
+# Local, unversioned overrides of node configuration
+*.local.yaml
 
 # --- Manager services (Docker Compose volumes) -----------------------
 volumes/
@@ -110,8 +116,15 @@ prometheus-data/
 
 # --- Generated reports and logs --------------------------------------
 reports/
+# Benchmark results describe a machine: local only
+nodes/*/benchmarks/results/
 *.log
 logs/
+
+# --- Work in progress (local only, never committed) ------------------
+# Only the README that explains the folder is versioned.
+wip/*
+!wip/README.md
 
 # --- Editor and operating system -------------------------------------
 .idea/

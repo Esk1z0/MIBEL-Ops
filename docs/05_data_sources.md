@@ -52,8 +52,8 @@ Since **1 October 2025** all MIBEL markets (day-ahead and intraday) trade in **1
 |---|---|
 | Access | `https://apidatos.ree.es/{lang}/datos/{category}/{widget}`. **No token.** |
 | Data | Balance, demand, generation (structure, renewable/non-renewable), exchanges (France, Portugal…), markets (`precios-mercados-tiempo-real`, secondary regulation) |
-| Resolution | `time_trunc` = hour / day / month / year. **Nothing finer than 1 hour.** |
-| Use | Token-free fallback, cross-validation and hourly backfill. **Not suitable as the main 15-min source.** |
+| Resolution | `time_trunc` = hour / day / month / year. Most widgets are hourly or daily, **but `demanda/demanda-tiempo-real` returns 5-minute demand** (real, forecast, scheduled) — see §7 |
+| Use | Token-free fallback, cross-validation and hourly backfill. Token-free source of **real-time demand** until the ESIOS token arrives. |
 
 ### 2.4 ENTSO-E Transparency Platform — European API (context and cross-validation)
 | Aspect | Detail |
@@ -152,6 +152,67 @@ Each source lives as an **independent connector** with its own contract and its 
 4. Check ENTSO-E resolution for the Spanish bidding zone.
 5. Test the 1-year backfill: OMIE (hourly → 15-min change in Oct-2025), chunked ESIOS and Open-Meteo Historical Forecast.
 6. Measure connector RAM and CPU on the Pi 3B+.
+
+## 7. First probe findings (2026-11-10)
+Single manual probes made while preparing [wip/ingestion/01_data_sources_exploration.ipynb](../wip/ingestion/01_data_sources_exploration.ipynb). They must be confirmed over several days in SP-01.
+
+| Source | Finding | Impact |
+|---|---|---|
+| OMIE | Download URL: `https://www.omie.es/es/file-download?parents=<prefix>&filename=<file>`. IDA files are `marginalpibc_YYYYMMDDSS.1` (`SS` = 01–03); IDA3 covers periods 49–96 | Connector naming settled |
+| OMIE | The continuous intraday file `precios_pibcic_YYYYMMDD.1` for 08/11/2026 was **emitted at 02:47 on 09/11** (Latin-1, decimal comma) | **The continuous price is not available in real time from OMIE**: the "last known continuous price" feature lags by ≥ 1 day unless ESIOS offers a real-time equivalent. Affects nowcast features (ADR-04) — to be reviewed after SP-01 |
+| REData | `demanda/demanda-tiempo-real` returns 5-min values without a token; `demanda/evolucion` and `generacion/estructura-generacion` require `time_trunc=day` | Real-time demand available before the ESIOS token |
+| Open-Meteo | Wind speed defaults to km/h; `wind_speed_unit=ms` is required. Historical Forecast, Previous Runs and Satellite APIs respond without a key | Connector must force the unit |
+| MIBGAS | One Excel file per year: `https://www.mibgas.es/en/file-access/MIBGAS_Data_{YEAR}.xlsx?path=AGNO_{YEAR}/XLS` | The sheet with the daily reference price is still [VERIFY] |
+
+### 7.1 First full notebook run (2026-11-11, delivery day 2026-11-09, ESIOS and AEMET keys available)
+
+| Source | Finding | Impact |
+|---|---|---|
+| OMIE | Second sample: continuous file for 09/11 **emitted at 02:59 on 10/11**. PT columns contain `0.00` when there were no trades (8 of 96 periods) | Confirms next-day publication. `0.00` must be treated as missing, not as a price (new data-gate rule needed) |
+| OMIE | Continuous − day-ahead spread on 09/11: mean −27.9, std 47.2, range −151.8 … +42.6 €/MWh | The day-ahead baseline leaves a lot of variance to explain → room for a useful model |
+| ESIOS | **1727 "Reference price in the continuous intraday market"**: hourly, last value at 13:41 UTC was the previous day's 22:00 UTC | **No real-time continuous price from ESIOS either.** "Last continuous price" cannot be an intraday feature; it is critical for the nowcast in DG-P06 → **decision pending** |
+| ESIOS | 1293 real demand (5 min) · 1295 real-time solar PV (5 min, ~10 min lag) · 541 wind forecast (15 min, up to end of D+1) · **1776/1778/1780 intraday H+3 forecasts of demand, wind and PV** (hourly, ~1.3 h ahead) · 1775/1777/1779 D+1 forecasts (hourly) | Good real-time coverage for both segments. 542 / 10034 (solar forecast) return no data: use 1779/1780 instead |
+| ESIOS | **600 day-ahead price includes France** (and PT, DE, BE) at 15 min; 1001 PVPC comes per territory (filter Península) | French price available without ENTSO-E → ENTSO-E priority can drop |
+| ESIOS | The API returns only the **latest version** of each forecast (no history of revisions) | Forecast vintages cannot be backfilled: the ingestor must **snapshot them in real time** from the start (point-in-time) |
+| REData | Daily generation contains small **negative values** (e.g. coal −94 MWh: auxiliary consumption) | DG-E11 "≥ 0" would wrongly reject them; the rule needs a per-technology tolerance |
+| Open-Meteo | Forecast, `minutely_15` and Satellite APIs OK; **Historical Forecast and Previous Runs APIs returned HTTP 503** twice | Needs retry with backoff; re-test before relying on them for the backfill |
+| MIBGAS | Daily index sheet: `MIBGAS Indexes` (`Delivery day`, `MIBGAS-ES Index`, `MIBGAS PVB Average Price Index Day-Ahead`) | Resolves the MIBGAS [VERIFY] |
+| AEMET | Works with the key (hourly station observations); the nearest station to the Galicia node has no wind (`vv` empty) | Pick the nearest station **with** wind data |
+
+### 7.2 Second run with notebook v2 (2026-11-11, general strike day in Spain)
+
+| Topic | Finding | Impact |
+|---|---|---|
+| Availability | 25 of 26 datasets OK (ENTSO-E skipped, no token). ESIOS real-time demand and PV arrived with ~8 min lag despite the strike | Sources are usable for a first ingestor |
+| Open-Meteo | Historical Forecast and Previous Runs answered after **retries with exponential backoff** (4 retries, factor 2) | Retries are mandatory in the connectors |
+| Baselines (09/11) | MAE vs continuous VWAP: **day-ahead 36.7 €/MWh**, **latest IDA 23.3 €/MWh** | The latest IDA price is a much stronger reference than day-ahead → day-ahead stays the official baseline; the latest IDA is reported as a stretch reference (A-26) |
+| Data gates | All current DG-E rules pass on 5,845 normalised observations, except DG-E11 (3 negative daily generation values). A tolerance of −1 % of the observed weekly maximum still flags 2 → the tolerance should be based on **installed capacity** | Proposed DG-E11 change; proposed new DG-E16 (continuous no-trade periods = missing) |
+| Contract | Long format `source, variable, node, event_time, available_at, value, unit, message_id`: ~214 bytes per JSON message, 1.9 MB in memory for 5,845 rows | Message size is small enough for the Pi and Kafka |
+| AEMET | Galicia node now uses the nearest station **with** wind (Lugo, ~35 km) | Station choice must be part of the configuration |
+
+### 7.3 First run of the ingestor node (2026-11-11, development desktop PC, `test` mode)
+Code: [nodes/ingestor/](../nodes/ingestor/README.md) · design: ADR-05 in [06_technical_decisions.md](06_technical_decisions.md).
+
+| Finding | Detail | Action |
+|---|---|---|
+| All enabled datasets work | 18/18 jobs `ok`, 0 observations rejected by DG-E (production profile) | — |
+| OMIE missing files | A file not yet published returns **HTTP 404 with an HTML page** | Treated as "not published yet", not as an error |
+| ESIOS indicator 600 | Returns every zone (~180 kB per call) | One dataset maps `España → ES` and `Francia → FR`: half the requests |
+| REData installed capacity | `generacion/potencia-instalada` returns **HTTP 500** (with and without geo filters) | Dataset disabled; DG-E11 checks only the sign until it works [VERIFY] |
+| MIBGAS cost | The yearly Excel (3.3 MB) takes ~1.0 s of CPU to parse on the development PC (70 % of a full pass) | Cadence lowered to every 12 h |
+| AEMET stations | Station ids fixed in configuration: Borja 9311X, Lugo 1518A, Mérida 4410X, Fuentes de Andalucía 5656 | One small call per station instead of the national dump |
+| Change detection | A second pass only sends new or revised values (e.g. 1 of 36 demand values) | Less traffic and CPU on the Pi |
+| Volume | ~110 bytes per observation in batches | — |
+
+### 7.4 ENTSO-E with token (2026-11-18, development desktop PC)
+| Finding | Detail | Action |
+|---|---|---|
+| Exploration notebook | 27 of 27 datasets OK, including ENTSO-E flows (A11) and actual generation per type (A75) | — |
+| Ingestor connector | `flow_fr_es`, `flow_es_fr`, `flow_pt_es`: 3/3 jobs `ok`, 273 observations at 15 min, 0 rejected | Enabled by `enabled: auto` as soon as `ENTSOE_TOKEN` exists |
+| Curve compression | Documents use curve type A03: repeated values are omitted and must be forward-filled (the notebook's raw parser shows fewer rows) | Done in the connector (`A03_forward_fill` lineage step) |
+| Latency | FR→ES flows arrived ~4 h behind ES→FR and PT→ES in the same request window | `available_at` = first seen in live mode, so features only see what had arrived |
+| Response time | ~8 s per request, negligible CPU | Hourly cadence is enough |
+| Actual generation per type (A75) | Works, but ESIOS already provides real-time wind and PV | Not added to the ingestor for now |
 
 ## Sources consulted
 - [OMIE · File access](https://www.omie.es/es/file-access-list)

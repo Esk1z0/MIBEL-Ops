@@ -1,7 +1,7 @@
 # AGENTS.md — Rules for AI agents in MIBEL-Ops
 
 > Applies to any agent (Claude Code, Copilot, Codex…) working in this repository.
-> Project context: [docs/README.md](docs/README.md) · Decisions: [docs/06_technical_decisions.md](docs/06_technical_decisions.md)
+> Project context: [docs/README.md](docs/README.md) · Decisions: [docs/06_technical_decisions.md](docs/06_technical_decisions.md) · Progress: [docs/STATUS.md](docs/STATUS.md)
 
 ## 1. General principle
 The repository is **public** and the system runs on **personal machines**. When in doubt about security, data or git: **stop and ask**.
@@ -65,3 +65,70 @@ Every reply in which something was created, modified or deleted must include:
 ## 7. Consistency with the documentation
 - If the code departs from what is documented in `docs/`, update the document in the same change or flag it explicitly.
 - Any new or modified decision is recorded in [docs/06_technical_decisions.md](docs/06_technical_decisions.md) (ADR-00).
+- Update [docs/STATUS.md](docs/STATUS.md) in the same change whenever the project state changes (work done, next step, pending decision, test evidence). Read it first when starting a session.
+
+## 8. Code style (readability first)
+Code is reviewed **function by function** by the maintainer. Write it so that each function can be understood without reading its body or the rest of the file. These rules apply to all new or modified Python code; when touching an existing function, bring it up to this style.
+
+### 8.1 Docstrings
+- Every **public** function, method and class has a docstring (Google style).
+- First line: what it does, imperative mood, one line (`"""Estimate when a backfilled observation was first published."""`).
+- Add a short paragraph only for what is not obvious: the reason, the rules it applies, invariants, references (DG-E, ADR, NFR).
+- `Args:` / `Returns:` / `Raises:` only when they add information the type hints do not give.
+- Private helpers (`_name`) get at least a one-line docstring unless they are trivial and their name says everything.
+
+### 8.2 Names
+- Full, descriptive names: `settings`, `dataset`, `observation`/`obs`, `connector`, `wall_start`. No one- or two-letter names except `i`/`j` in short loops and `exc` in `except`.
+- No magic indices or positional tuples for structured data (`acc[0]`, `(w, c)`): use a small `@dataclass` or `NamedTuple` with named fields.
+- Functions are verbs (`build_lineage`, `apply_gates`), booleans read as questions (`is_live`, `has_capacity`).
+
+### 8.3 Types that document
+- A closed set of values is an `Enum` (`class JobStatus(str, Enum)`), not a free string with the options listed in a comment. Python 3.10 compatible: no `StrEnum`.
+- Prefer dataclasses with named fields over `dict[str, Any]` or tuples when the shape is known.
+- Full type hints on every signature (mypy `strict` already applies).
+
+### 8.4 Comments explain *why*
+- Do not comment *what* the code does; the names should say that.
+- Comment *why*: a decision, a limit, a non-obvious edge case, or a reference (`# DG-E11 needs the latest installed MW per technology`).
+- A non-obvious block inside a long function starts with a one-line comment stating its purpose.
+
+### 8.5 One line, one idea
+- One assignment per line (`report.status = ...` then `report.error = ...`, never `a, b = x, y` for unrelated values).
+- No comprehensions that unpack nested tuples or contain conditionals and calls at the same time; use a loop or a named helper.
+- Calls with many arguments: one argument per line. Do not build large payloads inline inside a loop; extract them.
+- Prefer early returns (guard clauses) over deep nesting.
+
+### 8.6 Module layout
+Every module follows the same order:
+1. Module docstring: purpose, flow (a small diagram if useful), references to docs/ADR.
+2. Imports.
+3. Constants.
+4. Types (enums, dataclasses).
+5. **Public API**: what other modules use.
+6. Private helpers (`_name`), at the end.
+
+**Section banners.** Each top-level section starts with a three-line banner, 100 columns wide, title in UPPERCASE and centred, with **two blank lines before and after** so it stands out when scrolling and in the minimap:
+
+```python
+
+
+# ##################################################################################################
+# ################################     PRIVATE HELPERS: LOADING     ################################
+# ##################################################################################################
+
+
+def _resolve_mode(mode: str | None) -> RunMode:
+```
+
+- Titles: `CONSTANTS`, `TYPES`, `PUBLIC API`, `PRIVATE HELPERS`; add a sub-topic after a colon when a section is split (`PRIVATE HELPERS: LOADING`, `PUBLIC API: REGISTRY`). Test modules use the same banner to group tests (`OMIE`, `ESIOS`).
+- Ruff keeps two blank lines after the imports (`lines-after-imports = 2`), so the first banner has the same margin.
+- Inside a class, group related methods with a lighter one-line separator and one blank line around it: `# --- windows ---`.
+
+## 9. Working in increments
+The maintainer reviews every change before it grows. Work in small, confirmed steps:
+
+1. **Plan first.** Before writing code, list the classes/functions to create or change, one line each, and every open decision. Wait for the OK.
+2. **One class at a time.** Write one class (or one small group of related functions) with its tests, run lint and tests, show it and **stop** until the maintainer confirms it does what was asked.
+3. **No unrequested decisions.** If something needs a choice that is not in the request or in `docs/` (a new option, a threshold, a dependency, a behaviour change), ask; do not pick one silently.
+4. **No extra scope.** Fixes or ideas found on the way are listed, not implemented.
+5. **Exceptions:** mechanical changes the maintainer asked for in bulk (renames, formatting) may be done in one step.

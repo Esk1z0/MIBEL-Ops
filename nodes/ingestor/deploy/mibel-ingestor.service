@@ -1,0 +1,37 @@
+# systemd unit for the MIBEL-Ops ingestor (ADR-01: ingestors run without Docker).
+# Installed by deploy/install.sh; paths below assume the default install prefix /opt/mibel-ingestor.
+[Unit]
+Description=MIBEL-Ops ingestor node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mibel
+Group=mibel
+WorkingDirectory=/opt/mibel-ingestor
+# Secrets and deployment values (tokens, MIBEL_NODE_ID, MIBEL_KAFKA_BOOTSTRAP, MIBEL_METRICS_HOST)
+EnvironmentFile=/etc/mibel-ingestor/env
+Environment=MIBEL_INGESTOR_MODE=pro
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/mibel-ingestor/.venv/bin/mibel-ingestor run
+Restart=always
+RestartSec=10
+# State (SQLite buffer) lives in /var/lib/mibel-ingestor; systemd exports it as $STATE_DIRECTORY
+StateDirectory=mibel-ingestor
+StateDirectoryMode=0750
+# Keep the node light and protected
+MemoryMax=200M
+CPUWeight=50
+Nice=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

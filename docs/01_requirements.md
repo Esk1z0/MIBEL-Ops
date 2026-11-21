@@ -13,7 +13,7 @@
 
 | # | Goal | Success indicator |
 |---|---|---|
-| G-1 | Continuous and reliable capture | ≥ 99 % of 15-min windows captured per month; zero data loss for manager outages of up to 30 days |
+| G-1 | Continuous and reliable capture | ≥ 99 % of 15-min windows captured per month; no data loss for manager outages of up to 30 days (ingestor buffer); longer gaps recovered by backfill ([ADR-05](06_technical_decisions.md)) |
 | G-2 | Useful intraday forecast | Champion with **rMAE ≤ 0.90 against the day-ahead price** (see the [service baseline](quality/02_service_baseline.md)) |
 | G-3 | Autonomous MLOps loop | Drift → retraining → quality gate → promotion without human intervention |
 | G-4 | Elasticity | Add or remove ingestors and compute nodes (home or cloud) without code changes |
@@ -44,7 +44,7 @@
 |---|---|---|
 | **Operational** | Manager on and ≥ 1 compute node with a Champion | Full loop every 15 min |
 | **Collection only** | Manager on and 0 compute nodes | Data is captured and stored. No predictions. Retraining waits in the queue. |
-| **Manager off** | Laptop off | Ingestors buffer locally (up to 30 days) and resend when it comes back. No predictions. |
+| **Manager off** | Laptop off | Ingestors buffer locally (30 days / 1 GB by default) and resend when it comes back; longer gaps are recovered by backfill, except live-only forecast vintages. No predictions. |
 | **Degraded** | A source or an ingestor fails | Continue with what is available; affected features are flagged and, if critical, no prediction is made |
 
 ## 4. Functional requirements
@@ -60,7 +60,7 @@
 |---|---|---|
 | FR-03 | **Pluggable connectors**: one connector per source, enabled by configuration. v1: ESIOS, OMIE, Open-Meteo, MIBGAS and REData as fallback (see the [data source study](05_data_sources.md)). Each source publishes to its own topic `mibel.raw.<source>`. | M |
 | FR-04 | **Edge validation** with lightweight rules: contract structure and physical ranges (negative prices allowed). Invalid data goes to local quarantine and the reason is sent to the manager. | M |
-| FR-05 | **Reliable delivery**: persistent local buffer of up to **30 days or 1 GB**, retries with *backoff*, and deterministic ID `hash(source, event_time, variable)`. | M |
+| FR-05 | **Reliable delivery**: persistent local buffer (configurable; **30 days / 1 GB** by default; delivered messages deleted at once, so it only holds what the manager has not received), retries with *backoff* that never give up, change detection (only new or revised values travel) and deterministic ID `hash(source, variable, node, event_time, available_at)` ([ADR-05](06_technical_decisions.md)). | M |
 | FR-06 | **Backfill** of at least 1 year, runnable on any node. Harmonises OMIE's change from hourly to 15-min resolution (Oct-2025) and uses historical weather forecasts as they were issued. | M |
 
 ### 4.3 Manager
@@ -107,7 +107,7 @@
 |---|---|---|
 | NFR-01 | Forecast freshness | In operational mode, forecast stored ≤ 5 min after the window closes |
 | NFR-02 | Lightweight ingestor | < 200 MB RAM on the Pi 3B+; `systemd` service without Docker |
-| NFR-03 | Capture continuity | ≥ 99 % of windows per month; 30 days of autonomy without the manager |
+| NFR-03 | Capture continuity | ≥ 99 % of windows per month; buffer autonomy without the manager of **30 days / 1 GB** (configurable), beyond that recovery by backfill |
 | NFR-04 | Manager footprint | ≤ 10 GB RAM; disk ≤ budget (default 200 GB of the 350 GB) |
 | NFR-05 | Elasticity | Hot addition and removal of nodes |
 | NFR-06 | Zero-downtime deployment | Champion change without losing any window |
@@ -122,10 +122,10 @@
 | Risk | Mitigation |
 |---|---|
 | The continuous price may not be published in near real time | Exploration task SP-01; features based on the real latency; daily evaluation |
-| The manager is a single point of failure | 30-day buffer on ingestors; backups; distributed manager as future work |
+| The manager is a single point of failure | Short buffer on ingestors + backfill from the sources; backups; distributed manager as future work |
 | No compute nodes means no predictions | Accepted (A-05); coverage is measured and displayed |
 | *Leakage* in intraday features | `available_at` model + automatic point-in-time test |
-| ESIOS and ENTSO-E tokens pending approval | Request them in R0; REData as a token-free fallback |
+| ~~ESIOS and ENTSO-E tokens pending approval~~ | Resolved: both tokens received (ENTSO-E on 2026-11-18); REData stays as a token-free fallback |
 | Artifact growth | Retention policy with lineage protection |
 
 ## 9. Future work
