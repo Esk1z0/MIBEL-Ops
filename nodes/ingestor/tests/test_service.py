@@ -108,5 +108,9 @@ def test_crashed_job_is_logged_and_retried_with_backoff(settings: Settings) -> N
 def test_seen_ttl_shorter_than_a_live_window_is_refused() -> None:
     # mibgas looks 7 days back: forgetting sent values after 1 day would resend them on every poll
     short_memory = load(CONFIG_DIR, "dev", {"sink.type": "null", "buffer.seen_ttl": "1d"})
+    store = Store(":memory:")
     with pytest.raises(ConfigError, match="seen_ttl"):
-        Service(short_memory, store=Store(":memory:"), only={"mibgas"})
+        Service(short_memory, store=store, only={"mibgas"})
+    # a failed construction closes the store it owns (no SQLite connection left open)
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.count_pending()

@@ -187,6 +187,7 @@ def run_online(env_file: Path | None) -> dict[str, Any]:
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
     reports = service.run_once()
+    service.close()
     return {
         "wall_s": round(time.perf_counter() - wall_start, 2),
         "cpu_s": round(time.process_time() - cpu_start, 3),
@@ -210,6 +211,7 @@ def run_idle(seconds: float) -> dict[str, Any]:
     loop.join(timeout=30)
     cpu_seconds = time.process_time() - cpu_start
     wall_seconds = time.perf_counter() - wall_start
+    service.close()
     return {
         "seconds": seconds,
         "cpu_s": round(cpu_seconds, 4),
@@ -246,6 +248,7 @@ def _build_offline_setup() -> OfflineSetup:
     _set_dummy_secrets()
     node_settings = settings_module.load(None, "dev", {"sink.type": "null", "buffer.path": ":memory:"})
     service = Service(node_settings, sink=NullSink(), store=Store(":memory:"), only=set(node_settings.sources))
+    service.store.close()  # only the connectors are kept; each measured run opens its own store
     return OfflineSetup(node_settings, service.connectors)
 
 
@@ -267,14 +270,15 @@ def _offline_window(setup: OfflineSetup, connector: Connector, dataset: Dataset)
     """Return the live window at the reference time (MIBGAS: a whole year, like the real file)."""
     if connector.name == "mibgas":
         return Window(REFERENCE_NOW - timedelta(days=DAYS_IN_MIBGAS_FILE), REFERENCE_NOW + timedelta(days=1))
-    pipeline = Pipeline(
-        setup.settings,
-        Store(":memory:"),
-        Gates(setup.settings.quality, setup.settings.quality_profile),
-        setup.connectors,
-        lambda: REFERENCE_NOW,
-    )
-    return pipeline.live_window(dataset)
+    with Store(":memory:") as store:
+        pipeline = Pipeline(
+            setup.settings,
+            store,
+            Gates(setup.settings.quality, setup.settings.quality_profile),
+            setup.connectors,
+            lambda: REFERENCE_NOW,
+        )
+        return pipeline.live_window(dataset)
 
 
 def _measure_job(setup: OfflineSetup, job: PreparedJob, repeat: int) -> dict[str, Any]:

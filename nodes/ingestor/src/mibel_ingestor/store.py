@@ -24,6 +24,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import TracebackType
 from typing import NamedTuple
 
 from .model import UTC, Observation, OutgoingMessage, Rejection, to_iso
@@ -99,9 +100,22 @@ class Store:
             self._db.executescript(SCHEMA)
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection (closing twice is harmless)."""
         with self._lock:
             self._db.close()
+
+    def __enter__(self) -> Store:
+        """Use the store in a ``with`` block, which closes it at the end."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Close the connection: Python 3.13+ warns (ResourceWarning) about SQLite connections left open."""
+        self.close()
 
     # --- outbox ---
     def enqueue(self, messages: Iterable[OutgoingMessage]) -> int:

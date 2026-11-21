@@ -85,7 +85,8 @@ class Service:
 
         Args:
             sink: replaces the configured sink (tests and benchmarks).
-            store: replaces the SQLite file (tests use ``Store(":memory:")``).
+            store: replaces the SQLite file (tests use ``Store(":memory:")``). The service owns it:
+                ``close`` closes it, and so does a failed construction.
             only: run just these sources, even if disabled in the configuration.
 
         Raises:
@@ -93,14 +94,19 @@ class Service:
         """
         self.settings = settings
         self.store = store or Store(settings.buffer.path)
-        self.sink = sink or build_sink(settings.sink, settings.node_id)
-        self.gates = Gates(settings.quality, settings.quality_profile)
-        self.connectors = self._build_connectors(only)
-        if not self.connectors:
-            raise ConfigError("no source enabled")
-        self._check_change_detection_memory()
-        self.pipeline = Pipeline(settings, self.store, self.gates, self.connectors)
-        self.scheduler = Scheduler(settings, self.pipeline, self.store, self.sink)
+        try:
+            self.sink = sink or build_sink(settings.sink, settings.node_id)
+            self.gates = Gates(settings.quality, settings.quality_profile)
+            self.connectors = self._build_connectors(only)
+            if not self.connectors:
+                raise ConfigError("no source enabled")
+            self._check_change_detection_memory()
+            self.pipeline = Pipeline(settings, self.store, self.gates, self.connectors)
+            self.scheduler = Scheduler(settings, self.pipeline, self.store, self.sink)
+        except BaseException:
+            # nobody else holds the store yet: close it, or the SQLite connection is left open
+            self.store.close()
+            raise
 
     def run_forever(self) -> None:
         """Run the service loop until a stop is requested."""
